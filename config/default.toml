@@ -1,0 +1,15 @@
+[app]
+name = "Zero Caption"
+workspace_root = "data"
+log_level = "INFO"
+language = "zh-CN"
+theme = "system"
+
+[ui]
+default_page = "projects"
+
+[engine]
+asr = ""
+translator = ""
+exporter = ""
+
