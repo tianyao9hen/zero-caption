@@ -16,6 +16,15 @@ class WorkspaceManager:
 
     root: Path
 
+    _project_subdirs = (
+        "source",
+        "temp",
+        "cache",
+        "subtitles",
+        "exports",
+        "logs",
+    )
+
     @property
     def projects_dir(self) -> Path:
         """返回未来存放项目级数据的目录。"""
@@ -55,3 +64,16 @@ class WorkspaceManager:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.exports_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+
+    def ensure_project_structure(self, project_id: str) -> Path:
+        """创建并返回指定项目的标准工作目录结构。"""
+
+        self.ensure_structure()
+
+        project_dir = self.projects_dir / project_id
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        for dirname in self._project_subdirs:
+            (project_dir / dirname).mkdir(parents=True, exist_ok=True)
+
+        return project_dir
