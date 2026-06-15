@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from core.dto.task_dto import ExportRecordDTO, ExportVideoInput
+
 
 class VideoExporter(Protocol):
     """把视频和字幕产物组合并导出的能力。"""
 
-    def export(self, source_video: str, subtitle_path: str, output_path: str): ...
+    def export(self, request: ExportVideoInput) -> ExportRecordDTO: ...

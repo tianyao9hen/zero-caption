@@ -1,0 +1,9 @@
+[engine.asr]
+provider = "faster-whisper"
+model_name = "small"
+device = "cpu"
+compute_type = "int8"
+
+[task]
+max_concurrency = 1
+max_retries = 2

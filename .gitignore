@@ -10,3 +10,6 @@ logs/app.log
 .vscode
 .tmp
 AGENTS.md
+docs/
+pytest-cache-files*
+.pytest_tmp/

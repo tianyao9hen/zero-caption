@@ -1,0 +1,9 @@
+[engine.asr]
+provider = "faster-whisper"
+model_name = "small"
+device = "cuda"
+compute_type = "float16"
+
+[task]
+max_concurrency = 1
+max_retries = 2

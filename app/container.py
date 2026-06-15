@@ -11,7 +11,6 @@ import logging
 
 from config.settings import Settings
 from core.services.task_service import TaskService
-from infrastructure.task.job_queue import JobQueue
 from ui.windows.main_window import MainWindow
 from infrastructure.storage.workspace import WorkspaceManager
 
@@ -27,12 +26,12 @@ class AppContainer:
     def create_task_service(self) -> TaskService:
         """构建当前版本的任务服务实现。
 
-        现在的服务内部还是一个基于内存队列的占位实现。
-        以后如果切换成持久化队列或仓储驱动的真实实现，优先在这个工厂方法里
-        替换，而不是去修改 UI 页面代码。
+        阶段 1 已经把任务编排入口定型，但启动骨架仍然先返回一个
+        没有装配用例的服务对象。这样 UI 先能正常启动，
+        后续再在这里接入真实仓储和用例实例。
         """
 
-        return TaskService(job_queue=JobQueue(), logger=self.logger)
+        return TaskService()
 
     def create_main_window(self) -> MainWindow:
         """构建主窗口，并注入它依赖的服务。"""

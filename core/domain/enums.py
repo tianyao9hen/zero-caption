@@ -28,6 +28,22 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
+class TaskCheckpoint(str, Enum):
+    """任务检查点枚举。
+
+    这里的值用来表示主链路中“最后一个已经稳定完成的步骤”。
+    后续恢复、重试和界面进度展示都优先基于检查点推进，
+    避免把恢复语义硬塞进 `TaskStatus`。
+    """
+
+    IMPORTED = "imported"
+    AUDIO_EXTRACTED = "audio_extracted"
+    TRANSCRIBED = "transcribed"
+    TRANSLATED = "translated"
+    COMPOSED = "composed"
+    EXPORTED = "exported"
+
+
 class ExportMode(str, Enum):
     """字幕导出的支持模式。"""
 

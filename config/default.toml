@@ -8,8 +8,35 @@ theme = "system"
 [ui]
 default_page = "projects"
 
-[engine]
-asr = ""
-translator = ""
-exporter = ""
+[engine.asr]
+provider = "faster-whisper"
+model_name = "small"
+device = "cpu"
+compute_type = "int8"
 
+[engine.translation]
+provider = "openai-compatible"
+base_url = ""
+model = ""
+api_key_env = "OPENAI_API_KEY"
+
+[engine.export]
+default_mode = "soft_subtitle"
+
+[runtime]
+ffmpeg_path = "ffmpeg"
+ffprobe_path = "ffprobe"
+model_cache_dir = "data/models"
+
+[task]
+max_concurrency = 1
+max_retries = 2
+
+[subtitle]
+source_language = "auto"
+target_language = "zh-CN"
+
+[cache]
+enabled = true
+reuse_audio = true
+reuse_transcript = true
