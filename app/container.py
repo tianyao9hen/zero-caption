@@ -12,6 +12,12 @@ from typing import TYPE_CHECKING
 
 from config.settings import Settings
 from core.ports.asr import AsrEngine
+from core.ports.repository import (
+    ExportRecordRepository,
+    ProjectRepository,
+    SubtitleRepository,
+    TaskRepository,
+)
 from core.services.task_service import TaskService
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
@@ -21,13 +27,15 @@ from infrastructure.asr import FasterWhisperEngine
 from infrastructure.media.ffmpeg import FFmpegAdapter
 from infrastructure.media.ffprobe import FFprobeAdapter
 from infrastructure.storage.fingerprint import Sha256FileFingerprintCalculator
-from infrastructure.storage.memory_repositories import (
-    InMemoryExportRecordRepository,
-    InMemoryProjectRepository,
-    InMemorySubtitleRepository,
-    InMemoryTaskRepository,
-)
 from infrastructure.storage.workspace import WorkspaceManager
+from infrastructure.storage.sqlite_db import SQLiteDatabase
+from infrastructure.storage.sqlite_repositories import (
+    SQLiteExportRecordRepository,
+    SQLiteProjectRepository,
+    SQLiteSubtitleRepository,
+    SQLiteTaskRepository,
+)
+from infrastructure.task.job_queue import PersistentJobQueue
 from infrastructure.task.progress_bus import ProgressBus
 from infrastructure.subtitle.aligner import SubtitleAligner
 from infrastructure.subtitle.formatter import SubtitleFormatter
@@ -47,19 +55,38 @@ class AppContainer:
     settings: Settings
     workspace: WorkspaceManager
     logger: logging.Logger
-    project_repository: InMemoryProjectRepository = field(
-        default_factory=InMemoryProjectRepository
-    )
-    task_repository: InMemoryTaskRepository = field(
-        default_factory=InMemoryTaskRepository
-    )
-    subtitle_repository: InMemorySubtitleRepository = field(
-        default_factory=InMemorySubtitleRepository
-    )
-    export_record_repository: InMemoryExportRecordRepository = field(
-        default_factory=InMemoryExportRecordRepository
-    )
+    database: SQLiteDatabase | None = None
+    project_repository: ProjectRepository | None = None
+    task_repository: TaskRepository | None = None
+    subtitle_repository: SubtitleRepository | None = None
+    export_record_repository: ExportRecordRepository | None = None
+    job_queue: PersistentJobQueue | None = None
     progress_bus: ProgressBus = field(default_factory=ProgressBus)
+
+    def __post_init__(self) -> None:
+        """初始化默认 SQLite 仓储，同时保留测试替换适配器的注入入口。"""
+
+        # 第一步：创建共享数据库对象；每个仓储会按操作打开短连接，适合后台线程调用。
+        if self.database is None:
+            self.database = SQLiteDatabase(self.workspace.database_path)
+
+        # 第二步：只为没有显式注入的能力创建默认实现，便于单元测试继续使用内存仓储。
+        if self.project_repository is None:
+            self.project_repository = SQLiteProjectRepository(self.database)
+        if self.task_repository is None:
+            self.task_repository = SQLiteTaskRepository(self.database)
+        if self.subtitle_repository is None:
+            self.subtitle_repository = SQLiteSubtitleRepository(self.database)
+        if self.export_record_repository is None:
+            self.export_record_repository = SQLiteExportRecordRepository(self.database)
+        if self.job_queue is None:
+            self.job_queue = PersistentJobQueue(self.database)
+
+        # 第三步：把上次进程异常退出留下的运行中任务改成可恢复状态。
+        recover = getattr(self.task_repository, "recover_running_tasks", None)
+        if recover is not None:
+            recover()
+        self.job_queue.recover_running()
 
     def create_asr_engine(self) -> AsrEngine:
         """按照当前配置装配本地 ASR 适配器。

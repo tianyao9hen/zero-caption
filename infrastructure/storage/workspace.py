@@ -44,6 +44,12 @@ class WorkspaceManager:
         return self.root / "exports"
 
     @property
+    def database_path(self) -> Path:
+        """返回应用 SQLite 文件路径，和工作区一起迁移。"""
+
+        return self.root / "zero_caption.sqlite3"
+
+    @property
     def logs_dir(self) -> Path:
         """返回应用级日志目录。
 

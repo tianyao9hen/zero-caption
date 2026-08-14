@@ -1,0 +1,102 @@
+"""SQLite 仓储集成测试，保护应用重启后的数据可见性和状态恢复。"""
+
+from pathlib import Path
+
+from core.domain.entities import Project, Task
+from core.domain.enums import ProjectStatus, TaskCheckpoint, TaskStatus
+from core.dto.subtitle_dto import SubtitleSegmentDTO
+from core.dto.task_dto import ExportRecordDTO
+from core.domain.enums import ExportMode
+from infrastructure.storage.sqlite_db import SQLiteDatabase
+from infrastructure.storage.sqlite_repositories import (
+    SQLiteExportRecordRepository,
+    SQLiteProjectRepository,
+    SQLiteSubtitleRepository,
+    SQLiteTaskRepository,
+)
+
+
+def test_sqlite_repositories_round_trip_domain_data(tmp_path) -> None:
+    """项目、任务、字幕和导出记录写入后，新的仓储实例仍能读取。"""
+
+    # arrange：使用临时数据库模拟应用关闭后再次启动。
+    database = SQLiteDatabase(tmp_path / "zero-caption.sqlite3")
+    projects = SQLiteProjectRepository(database)
+    tasks = SQLiteTaskRepository(database)
+    subtitles = SQLiteSubtitleRepository(database)
+    exports = SQLiteExportRecordRepository(database)
+    project = Project(
+        project_id="project-1",
+        source_video=tmp_path / "source.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "projects" / "project-1",
+    )
+    project.mark_imported()
+    task = Task(task_id="task-1", project_id=project.project_id, task_type="demo")
+    task.update_progress(40, "识别", TaskCheckpoint.AUDIO_EXTRACTED, "已抽取")
+    segments = [SubtitleSegmentDTO("s1", 0, 1000, "hello", "en")]
+    record = ExportRecordDTO(
+        project_id=project.project_id,
+        source_video=project.source_video,
+        subtitle_path=tmp_path / "translated.srt",
+        output_path=tmp_path / "output.mp4",
+        mode=ExportMode.SOFT_SUBTITLE,
+    )
+
+    # act：保存所有结构化记录。
+    projects.save(project)
+    tasks.save(task)
+    subtitles.save_source_segments(project.project_id, segments)
+    subtitles.save_translated_segments(project.project_id, "zh-CN", [
+        SubtitleSegmentDTO("s1", 0, 1000, "你好", "zh-CN")
+    ])
+    exports.save(record)
+
+    # assert：重新创建仓储对象，验证数据来自磁盘而不是旧内存对象。
+    reopened = SQLiteDatabase(tmp_path / "zero-caption.sqlite3")
+    restored_project = SQLiteProjectRepository(reopened).get_by_id("project-1")
+    restored_task = SQLiteTaskRepository(reopened).get_by_id("task-1")
+    restored_source = SQLiteSubtitleRepository(reopened).get_source_segments("project-1")
+    restored_translation = SQLiteSubtitleRepository(reopened).get_translated_segments(
+        "project-1", "zh-CN"
+    )
+    restored_export = SQLiteExportRecordRepository(reopened).get_latest_by_project("project-1")
+
+    assert restored_project is not None
+    assert restored_project.status is ProjectStatus.IMPORTED
+    assert restored_project.source_video == project.source_video
+    assert restored_task is not None
+    assert restored_task.checkpoint is TaskCheckpoint.AUDIO_EXTRACTED
+    assert restored_task.progress == 40
+    assert restored_source == segments
+    assert restored_translation[0].text == "你好"
+    assert restored_export is not None
+    assert restored_export.mode is ExportMode.SOFT_SUBTITLE
+
+
+def test_sqlite_task_repository_recovers_running_tasks(tmp_path) -> None:
+    """应用重启时，运行中的任务应回到待处理而不是永久卡住。"""
+
+    database = SQLiteDatabase(tmp_path / "zero-caption.sqlite3")
+    projects = SQLiteProjectRepository(database)
+    tasks = SQLiteTaskRepository(database)
+    project = Project(
+        project_id="project-1",
+        source_video=Path("source.mp4"),
+        source_language="auto",
+        target_language="zh-CN",
+        workspace_dir=tmp_path,
+    )
+    projects.save(project)
+    task = Task(task_id="task-1", project_id=project.project_id, task_type="demo")
+    task.start("正在处理")
+    tasks.save(task)
+
+    # act：模拟新进程启动时执行恢复扫描。
+    recovered = tasks.recover_running_tasks()
+
+    # assert：任务仍保留原记录，但状态变为可重新领取的 pending。
+    assert len(recovered) == 1
+    assert recovered[0].status is TaskStatus.PENDING
+    assert recovered[0].message == "应用重启后等待恢复"
