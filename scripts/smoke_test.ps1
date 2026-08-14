@@ -1,8 +1,8 @@
 <#
-  Zero Caption smoke test for Windows releases.
+  Zero Caption 发布前烟雾测试。
 
-  The script checks imports, runtime tools, database initialization, Qt startup,
-  and the non-ASR regression suite without processing a real video.
+  这个脚本不处理真实视频，重点验证依赖导入、运行时工具、数据库初始化、
+  Qt 主窗口构造和不依赖真实 ASR 模型的回归测试。
 #>
 
 $ErrorActionPreference = "Stop"
