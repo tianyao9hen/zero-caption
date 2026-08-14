@@ -9,7 +9,12 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from core.domain.enums import ExportMode, ProjectStatus, TaskCheckpoint
+from core.domain.enums import (
+    ExportMode,
+    ProcessingMode,
+    ProjectStatus,
+    TaskCheckpoint,
+)
 from core.dto.media_dto import AudioStreamDTO, MediaProbeResultDTO, VideoStreamDTO
 from core.dto.project_dto import CreateProjectInput
 from core.dto.pipeline_dto import ProcessVideoInput
@@ -247,3 +252,58 @@ def test_task_service_process_video_orchestrates_the_four_steps(tmp_path) -> Non
     assert result.translation.project_id == result.project.project.project_id
     assert result.export.export_record.output_path == workspace.root / "final.mp4"
     assert result.export.export_record.output_path.is_file()
+
+
+def test_task_service_can_finish_after_local_transcription_without_translation(
+    tmp_path,
+) -> None:
+    """仅识别模式应生成原文字幕，且不要求装配翻译或视频导出能力。"""
+
+    # arrange：故意不注入翻译和导出用例；若核心编排误入后续步骤，
+    # 测试会立即因缺少用例而失败。
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    source_video = tmp_path / "demo.mp4"
+    source_video.write_bytes(b"fake video")
+    service = TaskService(
+        create_project_usecase=CreateProject(
+            project_repository=projects,
+            task_repository=tasks,
+            project_workspace=workspace,
+            fingerprint_calculator=Sha256FileFingerprintCalculator(),
+        ),
+        transcribe_video_usecase=TranscribeVideo(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+            media_probe=FakeMediaProbe(),
+            audio_extractor=FakeAudioExtractor(),
+            asr_engine=FakeAsrEngine(),
+            subtitle_formatter=SubtitleFormatter(),
+            subtitle_aligner=SubtitleAligner(),
+            srt_writer=SrtWriter(),
+        ),
+        project_repository=projects,
+    )
+
+    # act：只请求本地生成原文字幕。
+    result = service.process_video(
+        ProcessVideoInput(
+            source_video=source_video,
+            source_language="en",
+            target_language="zh-CN",
+            workspace_dir=workspace.root,
+            processing_mode=ProcessingMode.TRANSCRIBE_ONLY,
+        )
+    )
+
+    # assert：本地音频和字幕均落盘，项目成功结束且没有伪造后续结果。
+    assert result.transcription.audio_path is not None
+    assert result.transcription.audio_path.is_file()
+    assert result.subtitle_path is not None
+    assert result.subtitle_path.is_file()
+    assert result.translation is None
+    assert result.export is None
+    assert result.final_project.status is ProjectStatus.COMPLETED

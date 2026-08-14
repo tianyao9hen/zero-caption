@@ -49,3 +49,14 @@ class ExportMode(str, Enum):
 
     SOFT_SUBTITLE = "soft_subtitle"
     BURN_IN = "burn_in"
+
+
+class ProcessingMode(str, Enum):
+    """一次视频任务需要执行到哪个业务阶段。
+
+    枚举把“只生成原文字幕”和“继续翻译并导出”表达成稳定值，
+    避免界面层用多个布尔开关拼装容易矛盾的处理组合。
+    """
+
+    TRANSCRIBE_ONLY = "transcribe_only"
+    FULL_PIPELINE = "full_pipeline"

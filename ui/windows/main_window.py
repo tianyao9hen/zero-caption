@@ -116,6 +116,9 @@ class MainWindow(QMainWindow):
             self,
             default_source_language=self.settings.subtitle.source_language,
             default_target_language=self.settings.subtitle.target_language,
+            translation_configured=(
+                self.settings.engine.translation.is_configured()
+            ),
         )
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
@@ -136,13 +139,17 @@ class MainWindow(QMainWindow):
             self.status_widget.update_summary(summary)
 
     def _handle_pipeline_success(self, result: ProcessVideoResult) -> None:
-        """处理后台线程成功信号，刷新项目页并展示最终产物。"""
+        """处理后台线程成功信号，刷新项目页并展示本次主要产物。"""
 
         self.projects_page.show_result(result)
         self.navigation.page_changed.emit(0)
-        self.status_widget.show_message(
-            f"处理完成：{result.export.export_record.output_path}"
-        )
+        if result.export is not None:
+            output_path = result.export.export_record.output_path
+            self.status_widget.show_message(f"处理完成：{output_path}")
+            return
+
+        subtitle_path = result.subtitle_path
+        self.status_widget.show_message(f"原文字幕生成完成：{subtitle_path}")
 
     def _handle_pipeline_failure(self, message: str) -> None:
         """处理后台线程失败信号，并把错误展示给用户。"""

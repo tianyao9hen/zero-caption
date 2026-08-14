@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from core.domain.enums import ProcessingMode
 from core.dto.project_dto import CreateProjectInput, CreateProjectResult
 from core.dto.pipeline_dto import ProcessVideoInput, ProcessVideoResult
 from core.dto.subtitle_dto import (
@@ -17,6 +18,7 @@ from core.dto.subtitle_dto import (
     TranslateSubtitlesResult,
 )
 from core.dto.task_dto import ExportVideoInput, ExportVideoResult, TaskSummaryDTO
+from core.ports.repository import ProjectRepository
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
 from core.usecases.transcribe_video import TranscribeVideo
@@ -31,6 +33,7 @@ class TaskService:
     transcribe_video_usecase: TranscribeVideo | None = None
     translate_subtitles_usecase: TranslateSubtitles | None = None
     export_video_usecase: ExportVideo | None = None
+    project_repository: ProjectRepository | None = None
     _latest_task_summary: TaskSummaryDTO | None = field(default=None, init=False)
 
     def summary(self) -> str:
@@ -77,10 +80,10 @@ class TaskService:
         return result
 
     def process_video(self, request: ProcessVideoInput) -> ProcessVideoResult:
-        """按固定业务顺序执行导入、识别、翻译和外挂导出。
+        """按请求模式执行本地识别或完整字幕处理流程。
 
         这个方法是 UI 和命令行入口共享的核心编排入口。
-        调用方只提交一个完整请求，具体步骤仍由四个独立用例负责，
+        调用方只提交一个结构化请求，具体步骤仍由四个独立用例负责，
         因此页面层不需要复制主链路顺序或处理失败状态。
         """
 
@@ -98,6 +101,27 @@ class TaskService:
         transcription = self.transcribe_video(
             TranscribeVideoInput(project_id=created.project.project_id)
         )
+
+        # 仅识别模式到这里已经得到正式原文字幕。此分支不会触碰翻译器或
+        # 视频导出器，因此没有大模型配置和网络连接时也能正常完成任务。
+        if request.processing_mode is ProcessingMode.TRANSCRIBE_ONLY:
+            if transcription.subtitle_path is None:
+                raise RuntimeError("识别完成后没有生成原文字幕文件。")
+
+            project_repository = self._require_dependency(
+                self.project_repository,
+                "项目仓储",
+            )
+            project = project_repository.get_by_id(created.project.project_id)
+            if project is None:
+                raise RuntimeError("识别完成后无法读取项目记录。")
+            project.mark_completed()
+            project_repository.save(project)
+            created.project = project
+            return ProcessVideoResult(
+                project=created,
+                transcription=transcription,
+            )
 
         # 第三步：只把字幕文本发送给翻译端口，并写出译文字幕。
         translation = self.translate_subtitles(
@@ -153,3 +177,10 @@ class TaskService:
         if usecase is None:
             raise RuntimeError("当前 TaskService 尚未装配对应用例。")
         return usecase
+
+    def _require_dependency(self, dependency, name: str):
+        """确保可选的编排依赖已由应用容器注入。"""
+
+        if dependency is None:
+            raise RuntimeError(f"当前 TaskService 尚未装配{name}。")
+        return dependency

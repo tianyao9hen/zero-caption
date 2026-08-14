@@ -66,7 +66,8 @@ python scripts/check_runtime.py
 python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
 ```
 
-原文字幕会写入 `data/projects/<project_id>/subtitles/source.srt`。
+原文字幕会写入 `data/projects/<project_id>/subtitles/source.srt`。桌面导入对话框提供
+“仅生成原文字幕（本地）”处理方式，未配置大模型时会默认选中该方式，并跳过翻译和视频导出。
 
 ## Complete MVP Pipeline
 

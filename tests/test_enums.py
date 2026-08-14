@@ -5,7 +5,13 @@
 避免后续主链路扩展时把稳定协议改散。
 """
 
-from core.domain.enums import ExportMode, ProjectStatus, TaskCheckpoint, TaskStatus
+from core.domain.enums import (
+    ExportMode,
+    ProcessingMode,
+    ProjectStatus,
+    TaskCheckpoint,
+    TaskStatus,
+)
 
 
 def test_project_status_values():
@@ -27,6 +33,13 @@ def test_export_mode_values():
 
     assert ExportMode.SOFT_SUBTITLE.value == "soft_subtitle"
     assert ExportMode.BURN_IN.value == "burn_in"
+
+
+def test_processing_mode_values():
+    """处理方式枚举应稳定区分本地识别和完整流程。"""
+
+    assert ProcessingMode.TRANSCRIBE_ONLY.value == "transcribe_only"
+    assert ProcessingMode.FULL_PIPELINE.value == "full_pipeline"
 
 
 def test_task_checkpoint_values():

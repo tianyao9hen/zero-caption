@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 from typing import Any
 import tomllib
@@ -45,6 +46,19 @@ class TranslationSettings:
     max_retries: int = 2
     max_batch_segments: int = 20
     max_batch_characters: int = 4_000
+
+    def is_configured(self) -> bool:
+        """判断当前设置是否具备发起翻译请求的必要参数。
+
+        接口地址、模型名称和密钥缺一不可。密钥既可以由用户在软件内
+        保存，也可以通过 `api_key_env` 指向的环境变量提供；这里只返回
+        是否就绪，不返回或记录密钥正文。
+        """
+
+        api_key = self.api_key.strip()
+        if not api_key and self.api_key_env:
+            api_key = os.getenv(self.api_key_env, "").strip()
+        return bool(self.base_url.strip() and self.model.strip() and api_key)
 
 
 @dataclass(slots=True)

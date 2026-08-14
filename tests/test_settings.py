@@ -195,3 +195,28 @@ compute_type = "float16"
     assert settings.engine.asr.model_name == "medium"
     assert settings.engine.asr.device == "cuda"
     assert settings.engine.export.default_mode is ExportMode.SOFT_SUBTITLE
+
+
+def test_translation_settings_reports_whether_required_values_exist(monkeypatch):
+    """翻译就绪判断应同时支持软件内密钥和环境变量密钥。"""
+
+    # arrange：先清空测试环境变量，模拟首次启动且尚未配置大模型。
+    monkeypatch.delenv("TEST_CAPTION_API_KEY", raising=False)
+    missing = TranslationSettings(api_key_env="TEST_CAPTION_API_KEY")
+    configured_in_app = TranslationSettings(
+        base_url="https://llm.example/v1",
+        model="caption-model",
+        api_key="local-secret",
+        api_key_env="TEST_CAPTION_API_KEY",
+    )
+    configured_in_environment = TranslationSettings(
+        base_url="https://llm.example/v1",
+        model="caption-model",
+        api_key_env="TEST_CAPTION_API_KEY",
+    )
+
+    # act / assert：缺少参数时返回假，任一安全密钥来源就绪时返回真。
+    assert missing.is_configured() is False
+    assert configured_in_app.is_configured() is True
+    monkeypatch.setenv("TEST_CAPTION_API_KEY", "environment-secret")
+    assert configured_in_environment.is_configured() is True

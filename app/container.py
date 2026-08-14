@@ -196,6 +196,7 @@ class AppContainer:
             transcribe_video_usecase=transcribe_video,
             translate_subtitles_usecase=translate_subtitles,
             export_video_usecase=export_video,
+            project_repository=self.project_repository,
         )
 
     def update_translation_settings(

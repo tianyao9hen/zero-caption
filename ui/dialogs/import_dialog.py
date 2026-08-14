@@ -23,14 +23,20 @@ from PySide6.QtWidgets import (
 )
 
 from core.dto.pipeline_dto import ProcessVideoInput
-from core.domain.enums import ExportMode
+from core.domain.enums import ExportMode, ProcessingMode
 
 
 class ImportDialog(QDialog):
     """收集一次视频处理请求所需的最小参数。"""
 
-    def __init__(self, parent=None, default_source_language: str = "auto", default_target_language: str = "zh-CN") -> None:
-        """创建导入表单，并预填充应用默认语言。"""
+    def __init__(
+        self,
+        parent=None,
+        default_source_language: str = "auto",
+        default_target_language: str = "zh-CN",
+        translation_configured: bool = False,
+    ) -> None:
+        """创建导入表单，并根据翻译配置选择安全的默认处理方式。"""
 
         super().__init__(parent)
         self.setWindowTitle("导入视频")
@@ -43,6 +49,19 @@ class ImportDialog(QDialog):
         video_row = QHBoxLayout()
         video_row.addWidget(self.video_edit, 1)
         video_row.addWidget(browse_button)
+
+        self.processing_mode_combo = QComboBox()
+        self.processing_mode_combo.setObjectName("processingModeCombo")
+        self.processing_mode_combo.addItem(
+            "仅生成原文字幕（本地）",
+            ProcessingMode.TRANSCRIBE_ONLY,
+        )
+        self.processing_mode_combo.addItem(
+            "翻译字幕并导出视频",
+            ProcessingMode.FULL_PIPELINE,
+        )
+        if translation_configured:
+            self.processing_mode_combo.setCurrentIndex(1)
 
         self.source_language_combo = QComboBox()
         self.source_language_combo.addItems(["auto", "zh-CN", "en", "ja", "ko"])
@@ -59,12 +78,21 @@ class ImportDialog(QDialog):
         self.context_edit = QLineEdit()
         self.context_edit.setPlaceholderText("可选：作品、术语或角色上下文")
 
+        self.processing_hint_label = QLabel()
+        self.processing_hint_label.setWordWrap(True)
+        self.processing_mode_combo.currentIndexChanged.connect(
+            self._sync_processing_controls
+        )
+        self._sync_processing_controls()
+
         form = QFormLayout()
         form.addRow(QLabel("视频文件"), video_row)
+        form.addRow(QLabel("处理方式"), self.processing_mode_combo)
         form.addRow(QLabel("源语言"), self.source_language_combo)
         form.addRow(QLabel("目标语言"), self.target_language_combo)
         form.addRow(QLabel("导出模式"), self.export_mode_combo)
         form.addRow(QLabel("翻译上下文"), self.context_edit)
+        form.addRow(QLabel("说明"), self.processing_hint_label)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -97,6 +125,25 @@ class ImportDialog(QDialog):
             return
         self.accept()
 
+    def _sync_processing_controls(self) -> None:
+        """根据处理方式启用翻译相关控件并解释本地模式边界。"""
+
+        processing_mode = ProcessingMode(
+            self.processing_mode_combo.currentData()
+        )
+        full_pipeline = processing_mode is ProcessingMode.FULL_PIPELINE
+        self.target_language_combo.setEnabled(full_pipeline)
+        self.export_mode_combo.setEnabled(full_pipeline)
+        self.context_edit.setEnabled(full_pipeline)
+        if full_pipeline:
+            self.processing_hint_label.setText(
+                "完整流程需要先在设置页配置可用的大模型接口。"
+            )
+        else:
+            self.processing_hint_label.setText(
+                "视频、音频和语音识别均在本机完成，不需要大模型配置。"
+            )
+
     def to_request(self, workspace_dir: Path) -> ProcessVideoInput:
         """把已确认表单转换成核心层处理请求。"""
 
@@ -107,5 +154,8 @@ class ImportDialog(QDialog):
             target_language=self.target_language_combo.currentText(),
             workspace_dir=workspace_dir,
             context=context,
-            export_mode=self.export_mode_combo.currentData(),
+            export_mode=ExportMode(self.export_mode_combo.currentData()),
+            processing_mode=ProcessingMode(
+                self.processing_mode_combo.currentData()
+            ),
         )

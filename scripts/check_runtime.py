@@ -85,17 +85,15 @@ def probe_runtime(settings: Settings, workspace_root: Path) -> RuntimeReport:
     )
 
     # 第三步：检查翻译配置是否达到最小可用状态。
-    # 阶段0只要求知道“配置是否完整”，不在这里验证网络连通性或密钥真值。
-    translation_ready = bool(
-        settings.engine.translation.base_url and settings.engine.translation.model
-    )
+    # 这里只检查地址、模型和密钥是否齐全，不会访问网络或验证密钥真值。
+    translation_ready = settings.engine.translation.is_configured()
     items.append(
         ProbeItem(
             name="translation_config",
             status="pass" if translation_ready else "warn",
             message="翻译配置完整。"
             if translation_ready
-            else "尚未配置翻译接口地址或模型名，完整翻译主链路暂不可运行。",
+            else "尚未配置翻译接口地址、模型名或 API 密钥，完整翻译主链路暂不可运行。",
         )
     )
 

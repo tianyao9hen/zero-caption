@@ -23,12 +23,16 @@ class ProjectsPage(QWidget):
         self.source_label = QLabel("-")
         self.status_label = QLabel("-")
         self.workspace_label = QLabel(str(workspace.root))
+        self.audio_label = QLabel("-")
+        self.subtitle_label = QLabel("-")
         self.output_label = QLabel("-")
         for label in [
             self.project_id_label,
             self.source_label,
             self.status_label,
             self.workspace_label,
+            self.audio_label,
+            self.subtitle_label,
             self.output_label,
         ]:
             label.setTextInteractionFlags(
@@ -40,6 +44,8 @@ class ProjectsPage(QWidget):
         form.addRow("源视频", self.source_label)
         form.addRow("项目状态", self.status_label)
         form.addRow("工作区", self.workspace_label)
+        form.addRow("识别音频", self.audio_label)
+        form.addRow("字幕文件", self.subtitle_label)
         form.addRow("最近导出", self.output_label)
 
         layout = QVBoxLayout(self)
@@ -47,11 +53,16 @@ class ProjectsPage(QWidget):
         layout.addStretch(1)
 
     def show_result(self, result: ProcessVideoResult) -> None:
-        """展示完整处理结果中的项目和最终导出路径。"""
+        """展示本次处理结果中的项目和实际生成产物。"""
 
-        project = result.export.project
+        project = result.final_project
         self.project_id_label.setText(project.project_id)
         self.source_label.setText(str(project.source_video))
         self.status_label.setText(project.status.value)
         self.workspace_label.setText(str(project.workspace_dir))
-        self.output_label.setText(str(result.export.export_record.output_path))
+        self.audio_label.setText(str(result.transcription.audio_path or "-"))
+        self.subtitle_label.setText(str(result.subtitle_path or "-"))
+        if result.export is None:
+            self.output_label.setText("未执行视频导出")
+        else:
+            self.output_label.setText(str(result.export.export_record.output_path))
