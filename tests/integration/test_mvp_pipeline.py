@@ -12,6 +12,7 @@ from pathlib import Path
 from core.domain.enums import ExportMode, ProjectStatus, TaskCheckpoint
 from core.dto.media_dto import AudioStreamDTO, MediaProbeResultDTO, VideoStreamDTO
 from core.dto.project_dto import CreateProjectInput
+from core.dto.pipeline_dto import ProcessVideoInput
 from core.dto.subtitle_dto import (
     SubtitleSegmentDTO,
     TranscribeVideoInput,
@@ -183,3 +184,66 @@ def test_task_service_runs_complete_mvp_pipeline_and_reuses_translation(tmp_path
     assert translator.call_count == 1
     assert exported.project.status is ProjectStatus.COMPLETED
     assert exported.task.checkpoint is TaskCheckpoint.EXPORTED
+
+
+def test_task_service_process_video_orchestrates_the_four_steps(tmp_path) -> None:
+    """完整编排入口应按导入、识别、翻译、导出的顺序返回结果。"""
+
+    # arrange：为服务注入全套伪适配器，避免测试依赖本地模型或网络。
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    exports = InMemoryExportRecordRepository()
+    source_video = tmp_path / "demo.mp4"
+    source_video.write_bytes(b"fake video")
+
+    service = TaskService(
+        create_project_usecase=CreateProject(
+            project_repository=projects,
+            task_repository=tasks,
+            project_workspace=workspace,
+            fingerprint_calculator=Sha256FileFingerprintCalculator(),
+        ),
+        transcribe_video_usecase=TranscribeVideo(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+            media_probe=FakeMediaProbe(),
+            audio_extractor=FakeAudioExtractor(),
+            asr_engine=FakeAsrEngine(),
+            subtitle_formatter=SubtitleFormatter(),
+            subtitle_aligner=SubtitleAligner(),
+            srt_writer=SrtWriter(),
+        ),
+        translate_subtitles_usecase=TranslateSubtitles(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+            translator=FakeTranslator(),
+            subtitle_writer=SrtWriter(),
+        ),
+        export_video_usecase=ExportVideo(
+            project_repository=projects,
+            task_repository=tasks,
+            export_record_repository=exports,
+            exporter=SoftSubtitleExporter(),
+        ),
+    )
+
+    # act：只调用供 UI 和命令行共用的一站式入口。
+    result = service.process_video(
+        ProcessVideoInput(
+            source_video=source_video,
+            source_language="en",
+            target_language="zh-CN",
+            workspace_dir=workspace.root,
+            output_path=workspace.root / "final.mp4",
+        )
+    )
+
+    # assert：四个结果应来自同一个项目，最终文件和外挂字幕都已落盘。
+    assert result.project.project.project_id == result.transcription.project_id
+    assert result.translation.project_id == result.project.project.project_id
+    assert result.export.export_record.output_path == workspace.root / "final.mp4"
+    assert result.export.export_record.output_path.is_file()

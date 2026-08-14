@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from core.domain.enums import ExportMode
 from core.dto.project_dto import CreateProjectInput, CreateProjectResult
+from core.dto.pipeline_dto import ProcessVideoInput, ProcessVideoResult
 from core.dto.subtitle_dto import (
     TranscribeVideoInput,
     TranscribeVideoResult,
@@ -74,6 +76,65 @@ class TaskService:
         result = self._require_usecase(self.export_video_usecase).execute(request)
         self._remember_task(result.task)
         return result
+
+    def process_video(self, request: ProcessVideoInput) -> ProcessVideoResult:
+        """按固定业务顺序执行导入、识别、翻译和外挂导出。
+
+        这个方法是 UI 和命令行入口共享的核心编排入口。
+        调用方只提交一个完整请求，具体步骤仍由四个独立用例负责，
+        因此页面层不需要复制主链路顺序或处理失败状态。
+        """
+
+        # 第一步：创建项目并建立项目级工作目录。
+        created = self.create_project(
+            CreateProjectInput(
+                source_video=request.source_video,
+                source_language=request.source_language,
+                target_language=request.target_language,
+                workspace_dir=request.workspace_dir,
+            )
+        )
+
+        # 第二步：本地探测、抽音频、识别并写出原文字幕。
+        transcription = self.transcribe_video(
+            TranscribeVideoInput(project_id=created.project.project_id)
+        )
+
+        # 第三步：只把字幕文本发送给翻译端口，并写出译文字幕。
+        translation = self.translate_subtitles(
+            TranslateSubtitlesInput(
+                project_id=created.project.project_id,
+                source_language=request.source_language,
+                target_language=request.target_language,
+                context=request.context,
+            )
+        )
+        if translation.subtitle_path is None:
+            raise RuntimeError("翻译完成后没有生成正式字幕文件。")
+
+        # 第四步：默认把成品放到项目 exports 目录，调用方也可以显式指定路径。
+        output_path = request.output_path
+        if output_path is None:
+            output_path = (
+                created.project.workspace_dir
+                / "exports"
+                / request.source_video.name
+            )
+        export = self.export_video(
+            ExportVideoInput(
+                project_id=created.project.project_id,
+                source_video=request.source_video,
+                subtitle_path=translation.subtitle_path,
+                output_path=output_path,
+                mode=ExportMode.SOFT_SUBTITLE,
+            )
+        )
+        return ProcessVideoResult(
+            project=created,
+            transcription=transcription,
+            translation=translation,
+            export=export,
+        )
 
     def _remember_task(self, task) -> None:
         """把最近一次任务快照转成摘要，供界面层读取。"""

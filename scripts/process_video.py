@@ -11,10 +11,7 @@ import argparse
 from pathlib import Path
 
 from app.bootstrap import bootstrap_application
-from core.domain.enums import ExportMode
-from core.dto.project_dto import CreateProjectInput
-from core.dto.subtitle_dto import TranscribeVideoInput, TranslateSubtitlesInput
-from core.dto.task_dto import ExportVideoInput
+from core.dto.pipeline_dto import ProcessVideoInput
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,53 +42,24 @@ def main(argv: list[str] | None = None) -> int:
     context = bootstrap_application()
     task_service = context.container.create_task_service()
 
-    # 第一步：导入视频并创建项目目录和文件指纹。
-    created = task_service.create_project(
-        CreateProjectInput(
+    # 完整业务顺序由核心服务维护，脚本不重复编排四个用例。
+    # 这样桌面 UI 和命令行入口会共享同一条主链路。
+    result = task_service.process_video(
+        ProcessVideoInput(
             source_video=source_video,
             source_language=args.source_language,
             target_language=args.target_language,
             workspace_dir=context.workspace.root,
-        )
-    )
-
-    # 第二步：本地抽取音频、识别并写出原文字幕。
-    transcribed = task_service.transcribe_video(
-        TranscribeVideoInput(project_id=created.project.project_id)
-    )
-
-    # 第三步：只把字幕文本和语言上下文交给云端翻译适配器。
-    translated = task_service.translate_subtitles(
-        TranslateSubtitlesInput(
-            project_id=created.project.project_id,
-            source_language=args.source_language,
-            target_language=args.target_language,
             context=args.context,
-        )
-    )
-    if translated.subtitle_path is None:
-        raise RuntimeError("翻译完成后没有生成正式字幕文件。")
-
-    # 第四步：默认导出视频副本和同名 `.srt` 旁车字幕。
-    output_path = args.output
-    if output_path is None:
-        output_path = created.project.workspace_dir / "exports" / source_video.name
-    output_path = output_path.resolve()
-    exported = task_service.export_video(
-        ExportVideoInput(
-            project_id=created.project.project_id,
-            source_video=source_video,
-            subtitle_path=translated.subtitle_path,
-            output_path=output_path,
-            mode=ExportMode.SOFT_SUBTITLE,
+            output_path=args.output.resolve() if args.output is not None else None,
         )
     )
 
-    print(f"项目目录：{created.project.workspace_dir}")
-    print(f"原文字幕：{transcribed.subtitle_path}")
-    print(f"译文字幕：{translated.subtitle_path}")
-    print(f"导出视频：{exported.export_record.output_path}")
-    print(f"外挂字幕：{exported.export_record.subtitle_path}")
+    print(f"项目目录：{result.project.project.workspace_dir}")
+    print(f"原文字幕：{result.transcription.subtitle_path}")
+    print(f"译文字幕：{result.translation.subtitle_path}")
+    print(f"导出视频：{result.export.export_record.output_path}")
+    print(f"外挂字幕：{result.export.export_record.subtitle_path}")
     return 0
 
 

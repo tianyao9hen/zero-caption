@@ -28,6 +28,7 @@ from infrastructure.storage.memory_repositories import (
     InMemoryTaskRepository,
 )
 from infrastructure.storage.workspace import WorkspaceManager
+from infrastructure.task.progress_bus import ProgressBus
 from infrastructure.subtitle.aligner import SubtitleAligner
 from infrastructure.subtitle.formatter import SubtitleFormatter
 from infrastructure.subtitle.srt_writer import SrtWriter
@@ -58,6 +59,7 @@ class AppContainer:
     export_record_repository: InMemoryExportRecordRepository = field(
         default_factory=InMemoryExportRecordRepository
     )
+    progress_bus: ProgressBus = field(default_factory=ProgressBus)
 
     def create_asr_engine(self) -> AsrEngine:
         """按照当前配置装配本地 ASR 适配器。
@@ -87,6 +89,7 @@ class AppContainer:
         create_project = CreateProject(
             project_repository=self.project_repository,
             task_repository=self.task_repository,
+            event_publisher=self.progress_bus,
             project_workspace=self.workspace,
             fingerprint_calculator=Sha256FileFingerprintCalculator(),
         )
@@ -94,6 +97,7 @@ class AppContainer:
             project_repository=self.project_repository,
             task_repository=self.task_repository,
             subtitle_repository=self.subtitle_repository,
+            event_publisher=self.progress_bus,
             media_probe=FFprobeAdapter(self.settings.runtime.ffprobe_path),
             audio_extractor=FFmpegAdapter(self.settings.runtime.ffmpeg_path),
             asr_engine=asr_engine,
@@ -118,6 +122,7 @@ class AppContainer:
             task_repository=self.task_repository,
             subtitle_repository=self.subtitle_repository,
             translator=translator,
+            event_publisher=self.progress_bus,
             subtitle_writer=SrtWriter(),
         )
         export_video = ExportVideo(
@@ -125,6 +130,7 @@ class AppContainer:
             task_repository=self.task_repository,
             export_record_repository=self.export_record_repository,
             exporter=SoftSubtitleExporter(),
+            event_publisher=self.progress_bus,
         )
         return TaskService(
             create_project_usecase=create_project,
@@ -146,4 +152,5 @@ class AppContainer:
             workspace=self.workspace,
             task_service=task_service,
             logger=self.logger,
+            progress_bus=self.progress_bus,
         )
