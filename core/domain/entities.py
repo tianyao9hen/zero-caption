@@ -37,6 +37,7 @@ class Project:
     source_language: str
     target_language: str
     workspace_dir: Path
+    source_fingerprint: str = ""
     status: ProjectStatus = ProjectStatus.NEW
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)

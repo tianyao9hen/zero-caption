@@ -356,3 +356,67 @@ def test_transcribe_video_flow_creates_project_and_writes_source_srt(
     assert expected_audio_path.exists()
     assert expected_srt_path.exists()
     assert "第一句原文字幕" in expected_srt_path.read_text(encoding="utf-8")
+
+
+def test_transcribe_video_flow_reuses_audio_and_complete_transcript_cache(
+    workspace_temp_dir: Path,
+) -> None:
+    """缓存音频和完整原文字幕都存在时，不应重复执行高成本步骤。"""
+
+    # arrange：先创建项目和完整缓存状态。
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    publisher = RecordingTaskEventPublisher()
+    workspace = WorkspaceManager(workspace_temp_dir / "workspace")
+    source_video = _create_demo_source_video(workspace_temp_dir)
+    create_result = _build_create_project_usecase(projects, tasks, publisher).execute(
+        CreateProjectInput(
+            source_video=source_video,
+            source_language="ja-JP",
+            target_language="zh-CN",
+            workspace_dir=workspace.root,
+        )
+    )
+    project_dir = workspace.ensure_project_structure(create_result.project.project_id)
+    create_result.project.workspace_dir = project_dir
+    projects.save(create_result.project)
+
+    cached_audio_path = project_dir / "temp" / "source.wav"
+    cached_audio_path.write_bytes(b"cached wav data")
+    cached_srt_path = project_dir / "subtitles" / "source.srt"
+    cached_srt_path.write_text("缓存字幕", encoding="utf-8")
+    cached_segments = RecordingAsrEngine(calls=[]).transcribe(
+        cached_audio_path,
+        "ja-JP",
+    )
+    subtitles.save_source_segments(create_result.project.project_id, cached_segments)
+
+    media_probe = RecordingMediaProbe(calls=[])
+    audio_extractor = RecordingAudioExtractor(calls=[])
+    asr_engine = RecordingAsrEngine(calls=[])
+    srt_writer = RecordingSrtWriter()
+    usecase = _build_transcribe_video_usecase(
+        projects=projects,
+        tasks=tasks,
+        subtitles=subtitles,
+        media_probe=media_probe,
+        audio_extractor=audio_extractor,
+        asr_engine=asr_engine,
+        srt_writer=srt_writer,
+        publisher=publisher,
+    )
+
+    # act
+    result = usecase.execute(project_id=create_result.project.project_id)
+
+    # assert：仍会探测源媒体确认输入有效，但不会重复抽音频、识别或写字幕。
+    assert media_probe.calls == [source_video]
+    assert audio_extractor.calls == []
+    assert asr_engine.calls == []
+    assert srt_writer.calls == []
+    assert result.source_segments == cached_segments
+    assert result.reused_audio is True
+    assert result.reused_transcript is True
+    assert result.audio_path == cached_audio_path
+    assert result.subtitle_path == cached_srt_path

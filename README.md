@@ -1,19 +1,19 @@
 # zero-caption
 
-Video subtitle generation and translation desktop app skeleton for Windows.
+Windows 本地优先的视频字幕生成与翻译桌面应用。
 
 ## Status
 
-This repository currently contains the application shell only:
+当前已完成开发计划中的阶段 0、阶段 1 和阶段 2 本地识别链路：
 
-- PySide6 desktop entrypoint
-- layered project structure
-- configuration loading
-- logging bootstrap
-- workspace directory management
-- placeholder UI pages and dialogs
+- PySide6 桌面入口与分层项目结构
+- 配置、日志、运行时探针和项目工作区
+- FFmpeg / ffprobe 适配器
+- faster-whisper 本地语音识别适配器
+- 字幕去重、时间轴规整和 SRT 写出
+- 无界面的单视频识别主链路与缓存复用
 
-No real subtitle, translation, export, or database features are implemented yet.
+翻译、视频导出、桌面流程接入和 SQLite 恢复能力仍在后续阶段开发。
 
 ## Run
 
@@ -37,3 +37,13 @@ python scripts/check_runtime.py
 ```
 
 这个脚本会检查 `ffmpeg`、`ffprobe`、`faster-whisper` 以及关键翻译配置是否已经准备好。
+
+## Local Transcription
+
+阶段 2 可以先通过命令行运行本地识别，不依赖尚未完成的桌面交互页面：
+
+```powershell
+python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
+```
+
+原文字幕会写入 `data/projects/<project_id>/subtitles/source.srt`。

@@ -15,15 +15,18 @@ from core.domain.enums import TaskCheckpoint
 from core.dto.project_dto import CreateProjectInput, CreateProjectResult
 from core.ports.events import TaskEventPublisher
 from core.ports.repository import ProjectRepository, TaskRepository
+from core.ports.workspace import FileFingerprintCalculator, ProjectWorkspace
 
 
 @dataclass(slots=True)
 class CreateProject:
-    """负责创建项目实体和初始化任务快照。"""
+    """负责创建项目实体、项目目录和初始化任务快照。"""
 
     project_repository: ProjectRepository
     task_repository: TaskRepository
     event_publisher: TaskEventPublisher | None = None
+    project_workspace: ProjectWorkspace | None = None
+    fingerprint_calculator: FileFingerprintCalculator | None = None
 
     def execute(self, request: CreateProjectInput) -> CreateProjectResult:
         """执行项目创建流程。"""
@@ -32,17 +35,32 @@ class CreateProject:
         if not request.source_video.name:
             raise ValueError("源视频路径不能为空。")
 
-        # 第二步：创建项目实体，并立刻推进到“已导入”检查点。
+        # 第二步：先生成项目编号，再创建项目级标准目录。
+        # 工作区能力通过端口注入，因此核心层不需要知道目录具体怎样创建。
+        project_id = f"project-{uuid4().hex}"
+        workspace_dir = request.workspace_dir
+        if self.project_workspace is not None:
+            workspace_dir = self.project_workspace.ensure_project_structure(project_id)
+
+        # 第三步：按需计算源文件指纹。
+        # 指纹计算会流式读取文件，具体算法留在基础设施层，
+        # 后续缓存只需要比较这个稳定字符串，不需要再次加载整个视频。
+        source_fingerprint = ""
+        if self.fingerprint_calculator is not None:
+            source_fingerprint = self.fingerprint_calculator.calculate(request.source_video)
+
+        # 第四步：创建项目实体，并立刻推进到“已导入”检查点。
         project = Project(
-            project_id=f"project-{uuid4().hex}",
+            project_id=project_id,
             source_video=request.source_video,
             source_language=request.source_language,
             target_language=request.target_language,
-            workspace_dir=request.workspace_dir,
+            workspace_dir=workspace_dir,
+            source_fingerprint=source_fingerprint,
         )
         project.mark_imported()
 
-        # 第三步：为这次导入生成一个已完成任务。
+        # 第五步：为这次导入生成一个已完成任务，并先保存再发布事件。
         task = Task(
             task_id=f"task-{uuid4().hex}",
             project_id=project.project_id,

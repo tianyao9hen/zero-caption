@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.domain.entities import Task
+from core.dto.media_dto import MediaProbeResultDTO
 
 
 @dataclass(slots=True)
@@ -25,20 +26,33 @@ class SubtitleSegmentDTO:
 
 @dataclass(slots=True)
 class TranscribeVideoInput:
-    """描述识别用例的输入参数。"""
+    """描述识别用例的输入参数。
+
+    `audio_path` 主要用于测试、恢复任务或调用方已经准备好音频的场景。
+    常规主链路只传项目编号，识别用例会根据项目记录自行探测并抽取音频。
+    """
 
     project_id: str
-    audio_path: Path
+    audio_path: Path | None = None
     language: str | None = None
 
 
 @dataclass(slots=True)
 class TranscribeVideoResult:
-    """描述识别用例的输出结果。"""
+    """描述识别用例的输出结果。
+
+    除字幕片段外，结果还会返回本次使用的音频、字幕文件和媒体信息，
+    方便命令行入口、后续 UI 和恢复逻辑明确知道产物落在哪里。
+    """
 
     project_id: str
     task: Task
     source_segments: list[SubtitleSegmentDTO]
+    audio_path: Path | None = None
+    subtitle_path: Path | None = None
+    media: MediaProbeResultDTO | None = None
+    reused_audio: bool = False
+    reused_transcript: bool = False
 
 
 @dataclass(slots=True)
