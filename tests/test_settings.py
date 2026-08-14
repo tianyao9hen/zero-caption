@@ -64,8 +64,8 @@ api_key_env = "OPENAI_API_KEY"
 default_mode = "soft_subtitle"
 
 [runtime]
-ffmpeg_path = "ffmpeg"
-ffprobe_path = "ffprobe"
+ffmpeg_path = "resources/bin/ffmpeg/ffmpeg.exe"
+ffprobe_path = "resources/bin/ffmpeg/ffprobe.exe"
 model_cache_dir = "data/models"
 
 [task]
@@ -91,7 +91,7 @@ reuse_transcript = true
     # 避免后续在代码里继续到处散落字符串字面量。
     assert settings.engine.asr.provider == "faster-whisper"
     assert settings.engine.translation.provider == "openai-compatible"
-    assert settings.runtime.ffmpeg_path == "ffmpeg"
+    assert settings.runtime.ffmpeg_path == "resources/bin/ffmpeg/ffmpeg.exe"
     assert settings.task.max_retries == 2
     assert settings.cache.reuse_transcript is True
     assert settings.engine.export.default_mode is ExportMode.SOFT_SUBTITLE

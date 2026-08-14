@@ -24,8 +24,8 @@ api_key_env = "OPENAI_API_KEY"
 default_mode = "soft_subtitle"
 
 [runtime]
-ffmpeg_path = "ffmpeg"
-ffprobe_path = "ffprobe"
+ffmpeg_path = "resources/bin/ffmpeg/ffmpeg.exe"
+ffprobe_path = "resources/bin/ffmpeg/ffprobe.exe"
 model_cache_dir = "data/models"
 
 [task]

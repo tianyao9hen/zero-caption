@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from core.dto.subtitle_dto import SubtitleSegmentDTO
 
 
+@runtime_checkable
 class AsrEngine(Protocol):
     """核心流程所需的语音转文本能力。
 
