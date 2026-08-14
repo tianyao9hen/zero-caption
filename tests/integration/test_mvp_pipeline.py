@@ -1,0 +1,185 @@
+"""无界面 MVP 主链路集成测试。
+
+测试用轻量适配器替代真实模型和网络服务，验证四个核心用例可以通过
+`TaskService` 串成“导入 -> 识别 -> 翻译 -> 外挂导出”的完整流程。
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+from core.domain.enums import ExportMode, ProjectStatus, TaskCheckpoint
+from core.dto.media_dto import AudioStreamDTO, MediaProbeResultDTO, VideoStreamDTO
+from core.dto.project_dto import CreateProjectInput
+from core.dto.subtitle_dto import (
+    SubtitleSegmentDTO,
+    TranscribeVideoInput,
+    TranslateSubtitlesInput,
+)
+from core.dto.task_dto import ExportVideoInput
+from core.services.task_service import TaskService
+from core.usecases.create_project import CreateProject
+from core.usecases.export_video import ExportVideo
+from core.usecases.transcribe_video import TranscribeVideo
+from core.usecases.translate_subtitles import TranslateSubtitles
+from infrastructure.export.soft_subtitle_exporter import SoftSubtitleExporter
+from infrastructure.storage.fingerprint import Sha256FileFingerprintCalculator
+from infrastructure.storage.memory_repositories import (
+    InMemoryExportRecordRepository,
+    InMemoryProjectRepository,
+    InMemorySubtitleRepository,
+    InMemoryTaskRepository,
+)
+from infrastructure.storage.workspace import WorkspaceManager
+from infrastructure.subtitle.aligner import SubtitleAligner
+from infrastructure.subtitle.formatter import SubtitleFormatter
+from infrastructure.subtitle.srt_writer import SrtWriter
+
+
+class FakeMediaProbe:
+    """返回固定媒体信息，避免测试依赖真实编码格式。"""
+
+    def probe(self, source_path: Path) -> MediaProbeResultDTO:
+        """返回带视频流和音频流的最小探测结果。"""
+
+        return MediaProbeResultDTO(
+            source_path=source_path,
+            duration_ms=2_000,
+            video_stream=VideoStreamDTO("h264", 1280, 720),
+            audio_streams=[AudioStreamDTO("aac", 48_000, 2)],
+        )
+
+
+class FakeAudioExtractor:
+    """用占位字节模拟音频抽取产物。"""
+
+    def extract_audio(self, source_path: Path, output_path: Path) -> Path:
+        """在项目临时目录写入占位音频文件。"""
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake wav")
+        return output_path
+
+
+class FakeAsrEngine:
+    """返回固定原文字幕，避免测试下载本地模型。"""
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        language: str | None = None,
+    ) -> list[SubtitleSegmentDTO]:
+        """生成两条连续的原文字幕。"""
+
+        return [
+            SubtitleSegmentDTO("seg-1", 0, 1_000, "hello", language or "en"),
+            SubtitleSegmentDTO("seg-2", 1_000, 2_000, "world", language or "en"),
+        ]
+
+
+class FakeTranslator:
+    """把原文改成固定译文，并记录调用次数用于缓存断言。"""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def translate_segments(
+        self,
+        segments: list[SubtitleSegmentDTO],
+        source_language: str,
+        target_language: str,
+        context: str | None = None,
+    ) -> list[SubtitleSegmentDTO]:
+        """返回保持时间轴不变的目标语言字幕。"""
+
+        self.call_count += 1
+        translated_texts = ["你好", "世界"]
+        return [
+            replace(segment, text=text, language=target_language)
+            for segment, text in zip(segments, translated_texts, strict=True)
+        ]
+
+
+def test_task_service_runs_complete_mvp_pipeline_and_reuses_translation(tmp_path) -> None:
+    """四个用例应生成原文、译文、视频副本和外挂字幕，并复用译文缓存。"""
+
+    # arrange：所有仓储由同一个服务共享，模拟应用进程内的真实装配方式。
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    exports = InMemoryExportRecordRepository()
+    translator = FakeTranslator()
+    source_video = tmp_path / "demo.mp4"
+    source_video.write_bytes(b"fake video")
+
+    service = TaskService(
+        create_project_usecase=CreateProject(
+            project_repository=projects,
+            task_repository=tasks,
+            project_workspace=workspace,
+            fingerprint_calculator=Sha256FileFingerprintCalculator(),
+        ),
+        transcribe_video_usecase=TranscribeVideo(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+            media_probe=FakeMediaProbe(),
+            audio_extractor=FakeAudioExtractor(),
+            asr_engine=FakeAsrEngine(),
+            subtitle_formatter=SubtitleFormatter(),
+            subtitle_aligner=SubtitleAligner(),
+            srt_writer=SrtWriter(),
+        ),
+        translate_subtitles_usecase=TranslateSubtitles(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+            translator=translator,
+            subtitle_writer=SrtWriter(),
+        ),
+        export_video_usecase=ExportVideo(
+            project_repository=projects,
+            task_repository=tasks,
+            export_record_repository=exports,
+            exporter=SoftSubtitleExporter(),
+        ),
+    )
+
+    # act：依次执行四个显式动作，保持和未来桌面 UI 的交互模型一致。
+    created = service.create_project(
+        CreateProjectInput(source_video, "en", "zh-CN", workspace.root)
+    )
+    transcribed = service.transcribe_video(
+        TranscribeVideoInput(project_id=created.project.project_id)
+    )
+    translation_request = TranslateSubtitlesInput(
+        project_id=created.project.project_id,
+        source_language="en",
+        target_language="zh-CN",
+    )
+    translated = service.translate_subtitles(translation_request)
+    cached_translation = service.translate_subtitles(translation_request)
+    output_video = created.project.workspace_dir / "exports" / "demo.mp4"
+    exported = service.export_video(
+        ExportVideoInput(
+            project_id=created.project.project_id,
+            source_video=source_video,
+            subtitle_path=translated.subtitle_path,
+            output_path=output_video,
+            mode=ExportMode.SOFT_SUBTITLE,
+        )
+    )
+
+    # assert：先验证正式产物，再验证状态和缓存行为。
+    assert transcribed.subtitle_path is not None and transcribed.subtitle_path.is_file()
+    assert translated.subtitle_path is not None and translated.subtitle_path.is_file()
+    assert "你好" in translated.subtitle_path.read_text(encoding="utf-8")
+    assert output_video.read_bytes() == b"fake video"
+    assert output_video.with_suffix(".srt").is_file()
+    assert translated.task.checkpoint is TaskCheckpoint.TRANSLATED
+    assert cached_translation.reused_translation is True
+    assert translator.call_count == 1
+    assert exported.project.status is ProjectStatus.COMPLETED
+    assert exported.task.checkpoint is TaskCheckpoint.EXPORTED

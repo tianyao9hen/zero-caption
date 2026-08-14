@@ -95,7 +95,7 @@ def probe_runtime(settings: Settings, workspace_root: Path) -> RuntimeReport:
             status="pass" if translation_ready else "warn",
             message="翻译配置完整。"
             if translation_ready
-            else "尚未配置翻译接口地址或模型名，阶段3前需要补齐。",
+            else "尚未配置翻译接口地址或模型名，完整翻译主链路暂不可运行。",
         )
     )
 

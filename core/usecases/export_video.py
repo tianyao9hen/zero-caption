@@ -49,18 +49,30 @@ class ExportVideo:
         if self.event_publisher is not None:
             self.event_publisher.publish(task)
 
-        export_record = self.exporter.export(request)
-        self.export_record_repository.save(export_record)
-        task.mark_succeeded("导出完成", checkpoint=TaskCheckpoint.EXPORTED)
-        self.task_repository.save(task)
-        if self.event_publisher is not None:
-            self.event_publisher.publish(task)
+        try:
+            # 导出器只接收已经准备好的视频和字幕路径，
+            # 具体是复制旁车文件还是重新编码由基础设施适配器决定。
+            export_record = self.exporter.export(request)
+            self.export_record_repository.save(export_record)
+            task.mark_succeeded("导出完成", checkpoint=TaskCheckpoint.EXPORTED)
+            self.task_repository.save(task)
+            if self.event_publisher is not None:
+                self.event_publisher.publish(task)
 
-        project.mark_completed()
-        self.project_repository.save(project)
+            project.mark_completed()
+            self.project_repository.save(project)
 
-        return ExportVideoResult(
-            project=project,
-            task=task,
-            export_record=export_record,
-        )
+            return ExportVideoResult(
+                project=project,
+                task=task,
+                export_record=export_record,
+            )
+        except Exception as exc:
+            error_message = str(exc) or exc.__class__.__name__
+            task.mark_failed(error_message)
+            project.mark_failed(error_message)
+            self.task_repository.save(task)
+            self.project_repository.save(project)
+            if self.event_publisher is not None:
+                self.event_publisher.publish(task)
+            raise

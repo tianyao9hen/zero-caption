@@ -36,6 +36,10 @@ class TranslationSettings:
     base_url: str = ""
     model: str = ""
     api_key_env: str = "OPENAI_API_KEY"
+    timeout_seconds: float = 60.0
+    max_retries: int = 2
+    max_batch_segments: int = 20
+    max_batch_characters: int = 4_000
 
 
 @dataclass(slots=True)
@@ -174,6 +178,30 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 base_url=translation.get("base_url", settings.engine.translation.base_url),
                 model=translation.get("model", settings.engine.translation.model),
                 api_key_env=translation.get("api_key_env", settings.engine.translation.api_key_env),
+                timeout_seconds=float(
+                    translation.get(
+                        "timeout_seconds",
+                        settings.engine.translation.timeout_seconds,
+                    )
+                ),
+                max_retries=int(
+                    translation.get(
+                        "max_retries",
+                        settings.engine.translation.max_retries,
+                    )
+                ),
+                max_batch_segments=int(
+                    translation.get(
+                        "max_batch_segments",
+                        settings.engine.translation.max_batch_segments,
+                    )
+                ),
+                max_batch_characters=int(
+                    translation.get(
+                        "max_batch_characters",
+                        settings.engine.translation.max_batch_characters,
+                    )
+                ),
             ),
             export=ExportSettings(
                 default_mode=_load_export_mode(

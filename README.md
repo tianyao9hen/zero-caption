@@ -47,3 +47,13 @@ python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
 ```
 
 原文字幕会写入 `data/projects/<project_id>/subtitles/source.srt`。
+
+## Complete MVP Pipeline
+
+配置翻译接口地址、模型和 API 密钥环境变量后，可以运行完整无界面主链路：
+
+```powershell
+python scripts/process_video.py path/to/video.mp4 --source-language auto --target-language zh-CN
+```
+
+命令会在项目目录中保留原文字幕和译文字幕，并在 `exports/` 下生成视频副本与同名外挂字幕。

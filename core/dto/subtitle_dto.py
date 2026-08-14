@@ -72,3 +72,5 @@ class TranslateSubtitlesResult:
     project_id: str
     task: Task
     translated_segments: list[SubtitleSegmentDTO]
+    subtitle_path: Path | None = None
+    reused_translation: bool = False

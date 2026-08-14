@@ -19,6 +19,10 @@ provider = "openai-compatible"
 base_url = ""
 model = ""
 api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 60.0
+max_retries = 2
+max_batch_segments = 20
+max_batch_characters = 4000
 
 [engine.export]
 default_mode = "soft_subtitle"

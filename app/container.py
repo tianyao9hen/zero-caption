@@ -14,7 +14,9 @@ from config.settings import Settings
 from core.ports.asr import AsrEngine
 from core.services.task_service import TaskService
 from core.usecases.create_project import CreateProject
+from core.usecases.export_video import ExportVideo
 from core.usecases.transcribe_video import TranscribeVideo
+from core.usecases.translate_subtitles import TranslateSubtitles
 from infrastructure.asr import FasterWhisperEngine
 from infrastructure.media.ffmpeg import FFmpegAdapter
 from infrastructure.media.ffprobe import FFprobeAdapter
@@ -29,6 +31,9 @@ from infrastructure.storage.workspace import WorkspaceManager
 from infrastructure.subtitle.aligner import SubtitleAligner
 from infrastructure.subtitle.formatter import SubtitleFormatter
 from infrastructure.subtitle.srt_writer import SrtWriter
+from infrastructure.export import SoftSubtitleExporter
+from infrastructure.translation.batch_builder import TranslationBatchBuilder
+from infrastructure.translation.openai_translator import OpenAICompatibleTranslator
 
 if TYPE_CHECKING:
     from ui.windows.main_window import MainWindow
@@ -96,9 +101,36 @@ class AppContainer:
             subtitle_aligner=SubtitleAligner(),
             srt_writer=SrtWriter(),
         )
+        translation_settings = self.settings.engine.translation
+        translator = OpenAICompatibleTranslator(
+            base_url=translation_settings.base_url,
+            model=translation_settings.model,
+            api_key_env=translation_settings.api_key_env,
+            timeout_seconds=translation_settings.timeout_seconds,
+            max_retries=translation_settings.max_retries,
+            batch_builder=TranslationBatchBuilder(
+                max_segments=translation_settings.max_batch_segments,
+                max_characters=translation_settings.max_batch_characters,
+            ),
+        )
+        translate_subtitles = TranslateSubtitles(
+            project_repository=self.project_repository,
+            task_repository=self.task_repository,
+            subtitle_repository=self.subtitle_repository,
+            translator=translator,
+            subtitle_writer=SrtWriter(),
+        )
+        export_video = ExportVideo(
+            project_repository=self.project_repository,
+            task_repository=self.task_repository,
+            export_record_repository=self.export_record_repository,
+            exporter=SoftSubtitleExporter(),
+        )
         return TaskService(
             create_project_usecase=create_project,
             transcribe_video_usecase=transcribe_video,
+            translate_subtitles_usecase=translate_subtitles,
+            export_video_usecase=export_video,
         )
 
     def create_main_window(self) -> MainWindow:

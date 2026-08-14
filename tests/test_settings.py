@@ -59,6 +59,10 @@ provider = "openai-compatible"
 base_url = "https://example.invalid/v1"
 model = "gpt-4o-mini"
 api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 30.0
+max_retries = 3
+max_batch_segments = 10
+max_batch_characters = 2000
 
 [engine.export]
 default_mode = "soft_subtitle"
@@ -91,6 +95,10 @@ reuse_transcript = true
     # 避免后续在代码里继续到处散落字符串字面量。
     assert settings.engine.asr.provider == "faster-whisper"
     assert settings.engine.translation.provider == "openai-compatible"
+    assert settings.engine.translation.timeout_seconds == 30.0
+    assert settings.engine.translation.max_retries == 3
+    assert settings.engine.translation.max_batch_segments == 10
+    assert settings.engine.translation.max_batch_characters == 2000
     assert settings.runtime.ffmpeg_path == "resources/bin/ffmpeg/ffmpeg.exe"
     assert settings.task.max_retries == 2
     assert settings.cache.reuse_transcript is True
