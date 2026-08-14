@@ -8,9 +8,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
+from typing import Any
 import tomllib
 
+from config.paths import resource_path, user_data_path
 from core.domain.enums import ExportMode
 
 
@@ -28,13 +31,15 @@ class AsrSettings:
 class TranslationSettings:
     """描述翻译引擎的配置。
 
-    这里暂时只表达阶段0到阶段3会用到的最小字段：
-    翻译提供方、接口地址、模型名，以及保存密钥名的环境变量键。
+    `api_key` 由用户在设置页填写，并保存到当前 Windows 用户的数据目录。
+    `repr=False` 可以避免调试时直接打印配置对象而意外显示密钥正文。
+    当用户没有填写密钥时，适配器仍可从 `api_key_env` 指定的环境变量读取。
     """
 
     provider: str = "openai-compatible"
     base_url: str = ""
     model: str = ""
+    api_key: str = field(default="", repr=False)
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: float = 60.0
     max_retries: int = 2
@@ -117,28 +122,89 @@ class Settings:
     cache: CacheSettings = field(default_factory=CacheSettings)
 
 
-def load_settings(path: str | Path | None = None) -> Settings:
+def load_settings(
+    path: str | Path | None = None,
+    *,
+    user_path: str | Path | None = None,
+) -> Settings:
     """从 `TOML` 文件中加载配置。
 
     参数：
-        path：可选的配置文件路径。不传时，默认使用仓库中的
-            `config/default.toml`。
+        path：可选的单一配置文件路径。显式传入时只读取该文件，
+            主要供测试、脚本或专用配置使用。
+        user_path：可选的用户配置路径。未传 `path` 时，应用会先读取
+            随程序发布的默认配置，再用这个用户配置覆盖同名字段。
 
     返回：
-        一个 `Settings` 实例。如果文件不存在，就返回 dataclass 的默认值，
-        让应用仍然可以正常启动。
+        一个 `Settings` 实例。任何配置文件不存在时都会回退到
+        `dataclass` 或随程序发布的默认值，保证首次启动仍可运行。
     """
 
+    # 显式路径表示调用方希望独立读取一个配置文件，不再混入本机用户设置。
+    # 正常启动时则先读只读默认值，再叠加位于用户目录的可写配置。
+    if path is not None:
+        data = _load_toml(Path(path))
+    else:
+        default_data = _load_toml(resource_path("config/default.toml"))
+        user_config_path = (
+            Path(user_path) if user_path is not None else user_data_path("settings.toml")
+        )
+        data = _merge_mappings(default_data, _load_toml(user_config_path))
+
+    return _settings_from_data(data)
+
+
+def save_translation_settings(
+    settings: TranslationSettings,
+    path: str | Path | None = None,
+) -> Path:
+    """把用户可编辑的大模型翻译设置写入本地 `TOML` 文件。
+
+    参数：
+        settings：设置页收集到的翻译配置。
+        path：可选的输出路径。应用运行时默认写入当前用户的数据目录；
+            测试可以传入临时路径，避免修改真实用户配置。
+
+    返回：
+        实际写入的配置文件路径。
+
+    副作用：
+        会创建父目录，并通过临时文件替换方式写入配置，降低写入中断时
+        留下半个配置文件的风险。
+    """
+
+    _validate_translation_settings(settings)
+    target = Path(path) if path is not None else user_data_path("settings.toml")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # 当前用户配置文件只承载界面可编辑的大模型设置。
+    # 运行目录、工作区等安装期配置仍来自随程序发布的默认文件，
+    # 避免把已经解析成绝对路径的运行时值错误写回用户配置。
+    content = "\n".join(
+        [
+            "[engine.translation]",
+            f"provider = {_toml_string(settings.provider)}",
+            f"base_url = {_toml_string(settings.base_url)}",
+            f"model = {_toml_string(settings.model)}",
+            f"api_key = {_toml_string(settings.api_key)}",
+            f"api_key_env = {_toml_string(settings.api_key_env)}",
+            f"timeout_seconds = {settings.timeout_seconds}",
+            f"max_retries = {settings.max_retries}",
+            f"max_batch_segments = {settings.max_batch_segments}",
+            f"max_batch_characters = {settings.max_batch_characters}",
+            "",
+        ]
+    )
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(target)
+    return target
+
+
+def _settings_from_data(data: dict[str, Any]) -> Settings:
+    """把已经合并好的配置字典转换成结构化设置对象。"""
+
     settings = Settings()
-
-    # `Path` 比手工拼接字符串更适合处理路径，也方便后续统一转换成路径对象。
-    config_path = Path(path) if path else Path("config/default.toml")
-    if not config_path.exists():
-        return settings
-
-    # `tomllib` 读取 `TOML` 时需要二进制模式。
-    with config_path.open("rb") as handle:
-        data = tomllib.load(handle)
 
     # 第一步：读取顶层分组。
     # 这里用空字典兜底，是为了在配置文件只写局部字段时仍然能安全回退默认值。
@@ -177,6 +243,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 provider=translation.get("provider", settings.engine.translation.provider),
                 base_url=translation.get("base_url", settings.engine.translation.base_url),
                 model=translation.get("model", settings.engine.translation.model),
+                api_key=translation.get("api_key", settings.engine.translation.api_key),
                 api_key_env=translation.get("api_key_env", settings.engine.translation.api_key_env),
                 timeout_seconds=float(
                     translation.get(
@@ -228,6 +295,53 @@ def load_settings(path: str | Path | None = None) -> Settings:
             reuse_transcript=cache.get("reuse_transcript", settings.cache.reuse_transcript),
         ),
     )
+
+
+def _load_toml(path: Path) -> dict[str, Any]:
+    """读取一个可选的 `TOML` 文件，不存在时返回空字典。"""
+
+    if not path.exists():
+        return {}
+    # `tomllib` 读取 `TOML` 时需要二进制模式，这是标准库接口的要求。
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def _merge_mappings(
+    base: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    """递归合并配置分组，让用户文件只覆盖自己显式填写的字段。"""
+
+    result = dict(base)
+    for key, value in override.items():
+        current = result.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            result[key] = _merge_mappings(current, value)
+        else:
+            result[key] = value
+    return result
+
+
+def _validate_translation_settings(settings: TranslationSettings) -> None:
+    """检查设置页无法完全表达的数值边界，避免保存无效配置。"""
+
+    if settings.timeout_seconds <= 0:
+        raise ValueError("翻译请求超时时间必须大于 0。")
+    if settings.max_retries < 0:
+        raise ValueError("翻译最大重试次数不能小于 0。")
+    if settings.max_batch_segments <= 0:
+        raise ValueError("单批字幕条数必须大于 0。")
+    if settings.max_batch_characters <= 0:
+        raise ValueError("单批字幕字符数必须大于 0。")
+
+
+def _toml_string(value: str) -> str:
+    """把字符串编码成兼容 `TOML` 基础字符串的安全文本。"""
+
+    # JSON 与 TOML 的双引号字符串共享这里需要的转义规则，
+    # 用标准库编码可以正确处理引号、反斜杠和中文文本。
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def _load_export_mode(value: object) -> ExportMode:

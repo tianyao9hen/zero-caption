@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Callable
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from config.settings import Settings
+from config.settings import Settings, TranslationSettings
 from core.dto.pipeline_dto import ProcessVideoResult
 from core.services.task_service import TaskService
 from infrastructure.storage.workspace import WorkspaceManager
@@ -42,6 +43,8 @@ class MainWindow(QMainWindow):
         settings: Settings,
         workspace: WorkspaceManager,
         task_service: TaskService,
+        task_service_factory: Callable[[], TaskService],
+        settings_updater: Callable[[TranslationSettings], Settings],
         logger: logging.Logger,
         progress_bus: ProgressBus,
     ) -> None:
@@ -51,6 +54,8 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.workspace = workspace
         self.task_service = task_service
+        self.task_service_factory = task_service_factory
+        self.settings_updater = settings_updater
         self.logger = logger
         self.progress_bus = progress_bus
         self._pipeline_runner: PipelineRunner | None = None
@@ -78,6 +83,9 @@ class MainWindow(QMainWindow):
         # 界面框架里的信号机制是内建事件机制。
         # 这里导航控件发出页面索引，页面栈据此切换到对应页。
         self.navigation.page_changed.connect(self.stack.setCurrentIndex)
+        self.settings_page.save_requested.connect(
+            self._handle_translation_settings_save
+        )
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -148,3 +156,32 @@ class MainWindow(QMainWindow):
         if self._pipeline_runner is not None and not self._pipeline_runner.isRunning():
             self._pipeline_runner.deleteLater()
             self._pipeline_runner = None
+
+    def _handle_translation_settings_save(self, value: object) -> None:
+        """保存翻译配置，并重建后续任务使用的应用服务。"""
+
+        if not isinstance(value, TranslationSettings):
+            self.settings_page.show_save_result(False, "设置数据格式不正确。")
+            return
+
+        try:
+            # 第一步：由 `app` 层回调负责写入用户配置并更新容器状态。
+            updated_settings = self.settings_updater(value)
+
+            # 第二步：重新装配任务服务。已经运行的后台任务仍持有旧服务，
+            # 新服务只影响用户随后发起的任务，不会中途替换正在执行的适配器。
+            task_service = self.task_service_factory()
+        except (OSError, ValueError) as exc:
+            # 日志只记录异常类型和路径类信息，配置对象及 API 密钥不会进入日志。
+            self.logger.exception("保存大模型翻译设置失败")
+            self.settings_page.show_save_result(False, f"保存失败：{exc}")
+            return
+
+        self.settings = updated_settings
+        self.task_service = task_service
+        self.settings_page.apply_saved_settings(
+            updated_settings.engine.translation
+        )
+        message = "大模型设置已保存，后续任务将使用新配置。"
+        self.settings_page.show_save_result(True, message)
+        self.status_widget.show_message(message)

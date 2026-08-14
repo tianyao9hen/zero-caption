@@ -18,6 +18,7 @@ compute_type = "int8"
 provider = "openai-compatible"
 base_url = ""
 model = ""
+api_key = ""
 api_key_env = "OPENAI_API_KEY"
 timeout_seconds = 60.0
 max_retries = 2

@@ -35,3 +35,52 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
     window.close()
     window.deleteLater()
     app.processEvents()
+
+
+def test_main_window_refreshes_task_service_after_translation_settings_save(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """保存大模型设置后，后续任务应使用容器重新装配的新服务。"""
+
+    # arrange：用临时写入函数截获设置，避免测试修改真实用户目录。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    workspace.ensure_structure()
+    saved_settings = []
+
+    def save_to_temporary_file(settings):
+        saved_settings.append(settings)
+        return tmp_path / "settings.toml"
+
+    monkeypatch.setattr(
+        "app.container.save_translation_settings",
+        save_to_temporary_file,
+    )
+    container = AppContainer(
+        settings=Settings(workspace_root=workspace.root),
+        workspace=workspace,
+        logger=logging.getLogger("test-settings-refresh"),
+    )
+    window = container.create_main_window()
+    original_service = window.task_service
+
+    # act：通过真实页面按钮走完“信号 -> 主窗口 -> 容器 -> 重装配”路径。
+    window.settings_page.base_url_field.setText("https://llm.example/v1")
+    window.settings_page.model_field.setText("caption-model")
+    window.settings_page.api_key_field.setText("configured-secret")
+    window.settings_page.save_button.click()
+    app.processEvents()
+
+    # assert：配置已交给持久化入口，窗口和容器同时切换到新配置和新服务。
+    assert len(saved_settings) == 1
+    assert saved_settings[0].api_key == "configured-secret"
+    assert container.settings.engine.translation.model == "caption-model"
+    assert window.settings.engine.translation.base_url == "https://llm.example/v1"
+    assert window.task_service is not original_service
+    assert "后续任务将使用新配置" in window.settings_page.feedback_label.text()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()

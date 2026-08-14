@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 from typing import TYPE_CHECKING
 
-from config.settings import Settings
+from config.settings import (
+    Settings,
+    TranslationSettings,
+    save_translation_settings,
+)
 from core.ports.asr import AsrEngine
 from core.ports.repository import (
     ExportRecordRepository,
@@ -141,6 +145,7 @@ class AppContainer:
         translator = OpenAICompatibleTranslator(
             base_url=translation_settings.base_url,
             model=translation_settings.model,
+            api_key=translation_settings.api_key,
             api_key_env=translation_settings.api_key_env,
             timeout_seconds=translation_settings.timeout_seconds,
             max_retries=translation_settings.max_retries,
@@ -178,6 +183,31 @@ class AppContainer:
             export_video_usecase=export_video,
         )
 
+    def update_translation_settings(
+        self,
+        translation_settings: TranslationSettings,
+    ) -> Settings:
+        """持久化大模型配置，并更新后续依赖装配使用的设置对象。
+
+        这个方法位于 `app` 层，因为它需要协调配置层写入和容器状态更新。
+        UI 只把用户输入交到这里，不直接创建翻译适配器。
+        """
+
+        # 第一步：先完成磁盘写入。写入失败时保持当前运行配置不变，
+        # 让界面可以明确反馈失败，而不会出现内存与磁盘配置不一致。
+        save_translation_settings(translation_settings)
+
+        # 第二步：`dataclasses.replace` 会基于不可变思路创建新配置对象，
+        # 避免多个页面共享同一对象时被原地修改而难以追踪。
+        self.settings = replace(
+            self.settings,
+            engine=replace(
+                self.settings.engine,
+                translation=translation_settings,
+            ),
+        )
+        return self.settings
+
     def create_main_window(self) -> MainWindow:
         """构建主窗口，并注入它依赖的服务。"""
 
@@ -190,6 +220,8 @@ class AppContainer:
             settings=self.settings,
             workspace=self.workspace,
             task_service=task_service,
+            task_service_factory=self.create_task_service,
+            settings_updater=self.update_translation_settings,
             logger=self.logger,
             progress_bus=self.progress_bus,
         )

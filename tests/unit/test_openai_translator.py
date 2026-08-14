@@ -67,6 +67,36 @@ def test_translator_sends_only_text_and_language_context(monkeypatch) -> None:
     assert [(segment.start_ms, segment.end_ms) for segment in result] == [(0, 1_000), (1_000, 2_000)]
 
 
+def test_translator_prefers_api_key_configured_in_application(monkeypatch) -> None:
+    """软件内填写的密钥应优先于环境变量，并且只进入授权请求头。"""
+
+    # arrange：环境变量故意设置成另一值，用来证明显式用户配置具有更高优先级。
+    monkeypatch.setenv("TEST_TRANSLATION_KEY", "environment-secret")
+    captured_headers: list[dict[str, str]] = []
+
+    def transport(endpoint, headers, payload, timeout):
+        captured_headers.append(headers)
+        return {
+            "choices": [
+                {"message": {"content": json.dumps([{"id": "seg-1", "text": "你好"}])}}
+            ]
+        }
+
+    translator = OpenAICompatibleTranslator(
+        base_url="https://translation.example/v1",
+        model="test-model",
+        api_key="application-secret",
+        api_key_env="TEST_TRANSLATION_KEY",
+        transport=transport,
+    )
+
+    # act
+    translator.translate_segments([_segments()[0]], "ja-JP", "zh-CN")
+
+    # assert：密钥只用于请求头，翻译正文构造仍不包含认证信息。
+    assert captured_headers[0]["Authorization"] == "Bearer application-secret"
+
+
 def test_translator_retries_temporary_network_failure(monkeypatch) -> None:
     """网络临时失败时应按指数退避重试，并在成功后返回译文。"""
 

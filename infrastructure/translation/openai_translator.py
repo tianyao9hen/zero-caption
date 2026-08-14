@@ -32,6 +32,7 @@ class OpenAICompatibleTranslator:
         self,
         base_url: str,
         model: str,
+        api_key: str = "",
         api_key_env: str = "OPENAI_API_KEY",
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
@@ -39,9 +40,10 @@ class OpenAICompatibleTranslator:
         transport: Transport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        """保存接口配置，并延迟读取 API 密钥。
+        """保存接口配置，并在真正请求前解析 API 密钥。
 
-        密钥只在真正发送请求时从环境变量读取，不会写入配置对象、日志或异常文本。
+        用户在软件内填写的密钥优先使用；为空时再读取环境变量。
+        密钥不会进入请求正文、日志或异常文本。
         `transport` 是测试注入点；生产环境默认使用标准库 `urllib`。
         """
 
@@ -51,6 +53,7 @@ class OpenAICompatibleTranslator:
             raise ValueError("翻译最大重试次数不能小于 0。")
         self.base_url = base_url.strip()
         self.model = model.strip()
+        self.api_key = api_key.strip()
         self.api_key_env = api_key_env
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
@@ -119,12 +122,8 @@ class OpenAICompatibleTranslator:
             raise TranslationConfigurationError("翻译接口地址尚未配置。")
         if not self.model:
             raise TranslationConfigurationError("翻译模型尚未配置。")
-        if not self.api_key_env:
-            raise TranslationConfigurationError("翻译 API 密钥环境变量名尚未配置。")
-        if not os.getenv(self.api_key_env):
-            raise TranslationConfigurationError(
-                f"未找到翻译 API 密钥环境变量：{self.api_key_env}"
-            )
+        if not self._resolved_api_key():
+            raise TranslationConfigurationError("翻译 API 密钥尚未配置。")
 
     def _request_with_retry(self, batch: TranslationBatch) -> JsonPayload:
         """发送一个批次，并对网络或服务端临时错误做指数退避重试。"""
@@ -133,7 +132,7 @@ class OpenAICompatibleTranslator:
         endpoint = self._endpoint()
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {os.environ[self.api_key_env]}",
+            "Authorization": f"Bearer {self._resolved_api_key()}",
         }
 
         for attempt in range(self.max_retries + 1):
@@ -254,3 +253,12 @@ class OpenAICompatibleTranslator:
         """判断 HTTP 状态是否通常表示临时服务问题。"""
 
         return status_code == 429 or 500 <= status_code < 600
+
+    def _resolved_api_key(self) -> str:
+        """优先返回软件内配置的密钥，再尝试环境变量兜底。"""
+
+        if self.api_key:
+            return self.api_key
+        if not self.api_key_env:
+            return ""
+        return os.getenv(self.api_key_env, "").strip()

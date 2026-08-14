@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 
 from app.container import AppContainer
 from config.settings import Settings, load_settings
+from config.paths import resource_path, user_data_path
 from infrastructure.logging.setup import configure_logging
 from infrastructure.storage.workspace import WorkspaceManager
 from scripts.check_runtime import RuntimeReport, probe_runtime
@@ -36,7 +38,38 @@ def build_runtime_report(settings: Settings) -> RuntimeReport:
     避免在多个层里重复实现依赖检查逻辑。
     """
 
-    return probe_runtime(settings=settings, workspace_root=Path("."))
+    return probe_runtime(settings=settings, workspace_root=settings.workspace_root)
+
+
+def _resolve_runtime_settings(settings: Settings) -> Settings:
+    """把可写数据与只读依赖分别解析到正确的运行时目录。"""
+
+    # 安装目录通常位于 `Program Files`，普通用户没有权限在其中写入项目数据。
+    # 因此只有绝对路径才保持原样，相对路径统一迁移到用户数据根目录。
+    workspace_root = user_data_path(settings.workspace_root)
+    model_cache_dir = user_data_path(settings.runtime.model_cache_dir)
+    ffmpeg_path = _resolve_bundled_executable(settings.runtime.ffmpeg_path)
+    ffprobe_path = _resolve_bundled_executable(settings.runtime.ffprobe_path)
+    return replace(
+        settings,
+        workspace_root=workspace_root,
+        runtime=replace(
+            settings.runtime,
+            ffmpeg_path=ffmpeg_path,
+            ffprobe_path=ffprobe_path,
+            model_cache_dir=model_cache_dir,
+        ),
+    )
+
+
+def _resolve_bundled_executable(value: str) -> str:
+    """优先返回随程序发布的可执行文件，同时保留开发环境的命令回退。"""
+
+    configured = Path(value)
+    if configured.is_absolute():
+        return str(configured)
+    bundled = resource_path(configured)
+    return str(bundled) if bundled.exists() else value
 
 
 def bootstrap_application() -> ApplicationContext:
@@ -45,7 +78,7 @@ def bootstrap_application() -> ApplicationContext:
     # 第一步：从磁盘读取配置。
     # 如果是第一次打开仓库，或者用户还没有自定义配置文件，
     # 这里会自动回退到 `Settings` 中定义的默认值。
-    settings = load_settings()
+    settings = _resolve_runtime_settings(load_settings())
 
     # 第二步：创建工作区管理器，并提前确保目录结构存在。
     # 这样后面的日志和数据写入不会因为目录缺失而在启动阶段失败。
