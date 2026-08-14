@@ -11,6 +11,7 @@ import argparse
 from pathlib import Path
 
 from app.bootstrap import bootstrap_application
+from core.domain.enums import ExportMode
 from core.dto.pipeline_dto import ProcessVideoInput
 
 
@@ -22,6 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-language", default="auto", help="源语言代码。")
     parser.add_argument("--target-language", default="zh-CN", help="目标语言代码。")
     parser.add_argument("--context", default=None, help="可选的作品或术语上下文。")
+    parser.add_argument(
+        "--export-mode",
+        choices=[mode.value for mode in ExportMode],
+        default=ExportMode.SOFT_SUBTITLE.value,
+        help="导出模式：外挂字幕或烧录字幕。",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -52,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
             workspace_dir=context.workspace.root,
             context=args.context,
             output_path=args.output.resolve() if args.output is not None else None,
+            export_mode=ExportMode(args.export_mode),
         )
     )
 

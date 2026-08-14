@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.dto.project_dto import CreateProjectResult
+from core.domain.enums import ExportMode
 from core.dto.subtitle_dto import (
     TranscribeVideoResult,
     TranslateSubtitlesResult,
@@ -27,6 +28,7 @@ class ProcessVideoInput:
     workspace_dir: Path
     context: str | None = None
     output_path: Path | None = None
+    export_mode: ExportMode = ExportMode.SOFT_SUBTITLE
 
 
 @dataclass(slots=True)

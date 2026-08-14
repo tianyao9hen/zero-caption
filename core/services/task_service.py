@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from core.domain.enums import ExportMode
 from core.dto.project_dto import CreateProjectInput, CreateProjectResult
 from core.dto.pipeline_dto import ProcessVideoInput, ProcessVideoResult
 from core.dto.subtitle_dto import (
@@ -126,7 +125,7 @@ class TaskService:
                 source_video=request.source_video,
                 subtitle_path=translation.subtitle_path,
                 output_path=output_path,
-                mode=ExportMode.SOFT_SUBTITLE,
+                mode=request.export_mode,
             )
         )
         return ProcessVideoResult(

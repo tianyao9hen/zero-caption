@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.dto.pipeline_dto import ProcessVideoInput
+from core.domain.enums import ExportMode
 
 
 class ImportDialog(QDialog):
@@ -51,6 +52,10 @@ class ImportDialog(QDialog):
         self.target_language_combo.addItems(["zh-CN", "en", "ja", "ko"])
         self.target_language_combo.setCurrentText(default_target_language)
 
+        self.export_mode_combo = QComboBox()
+        self.export_mode_combo.addItem("外挂字幕（推荐）", ExportMode.SOFT_SUBTITLE)
+        self.export_mode_combo.addItem("烧录字幕", ExportMode.BURN_IN)
+
         self.context_edit = QLineEdit()
         self.context_edit.setPlaceholderText("可选：作品、术语或角色上下文")
 
@@ -58,6 +63,7 @@ class ImportDialog(QDialog):
         form.addRow(QLabel("视频文件"), video_row)
         form.addRow(QLabel("源语言"), self.source_language_combo)
         form.addRow(QLabel("目标语言"), self.target_language_combo)
+        form.addRow(QLabel("导出模式"), self.export_mode_combo)
         form.addRow(QLabel("翻译上下文"), self.context_edit)
 
         buttons = QDialogButtonBox(
@@ -101,4 +107,5 @@ class ImportDialog(QDialog):
             target_language=self.target_language_combo.currentText(),
             workspace_dir=workspace_dir,
             context=context,
+            export_mode=self.export_mode_combo.currentData(),
         )

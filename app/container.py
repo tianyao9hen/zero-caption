@@ -40,7 +40,12 @@ from infrastructure.task.progress_bus import ProgressBus
 from infrastructure.subtitle.aligner import SubtitleAligner
 from infrastructure.subtitle.formatter import SubtitleFormatter
 from infrastructure.subtitle.srt_writer import SrtWriter
-from infrastructure.export import SoftSubtitleExporter
+from infrastructure.export import (
+    BurnInExporter,
+    CompositeVideoExporter,
+    SoftSubtitleExporter,
+)
+from core.domain.enums import ExportMode
 from infrastructure.translation.batch_builder import TranslationBatchBuilder
 from infrastructure.translation.openai_translator import OpenAICompatibleTranslator
 
@@ -156,7 +161,14 @@ class AppContainer:
             project_repository=self.project_repository,
             task_repository=self.task_repository,
             export_record_repository=self.export_record_repository,
-            exporter=SoftSubtitleExporter(),
+            exporter=CompositeVideoExporter(
+                exporters={
+                    ExportMode.SOFT_SUBTITLE: SoftSubtitleExporter(),
+                    ExportMode.BURN_IN: BurnInExporter(
+                        self.settings.runtime.ffmpeg_path
+                    ),
+                }
+            ),
             event_publisher=self.progress_bus,
         )
         return TaskService(
