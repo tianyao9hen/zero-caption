@@ -4,7 +4,7 @@ Windows 本地优先的视频字幕生成与翻译桌面应用。
 
 ## Status
 
-当前已完成开发计划中的阶段 0、阶段 1 和阶段 2 本地识别链路：
+当前已完成开发计划中阶段 0 至阶段 7 的主要能力：
 
 - PySide6 桌面入口与分层项目结构
 - 配置、日志、运行时探针和项目工作区
@@ -12,8 +12,12 @@ Windows 本地优先的视频字幕生成与翻译桌面应用。
 - faster-whisper 本地语音识别适配器
 - 字幕去重、时间轴规整和 SRT 写出
 - 无界面的单视频识别主链路与缓存复用
+- 云端字幕翻译、外挂字幕和 FFmpeg 烧录导出
+- PySide6 后台任务、进度总线和导入参数表单
+- SQLite 项目/任务/字幕/导出记录与可恢复任务队列
+- ASS 字幕、项目日志、诊断包和 Windows 打包烟测脚本
 
-翻译、视频导出、桌面流程接入和 SQLite 恢复能力仍在后续阶段开发。
+首次启动会在工作区内创建 `zero_caption.sqlite3`，用于保存项目历史和任务状态。
 
 ## Run
 
@@ -30,7 +34,7 @@ python -m pytest
 
 ## Runtime Check
 
-在进入后续识别、翻译和导出开发前，可以先运行：
+在处理真实视频前，可以先运行：
 
 ```powershell
 python scripts/check_runtime.py
@@ -40,7 +44,7 @@ python scripts/check_runtime.py
 
 ## Local Transcription
 
-阶段 2 可以先通过命令行运行本地识别，不依赖尚未完成的桌面交互页面：
+可以通过命令行运行本地识别，不依赖桌面交互页面：
 
 ```powershell
 python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
@@ -57,3 +61,4 @@ python scripts/process_video.py path/to/video.mp4 --source-language auto --targe
 ```
 
 命令会在项目目录中保留原文字幕和译文字幕，并在 `exports/` 下生成视频副本与同名外挂字幕。
+需要烧录字幕时追加 `--export-mode burn_in`；桌面导入对话框也可以直接选择导出模式。
