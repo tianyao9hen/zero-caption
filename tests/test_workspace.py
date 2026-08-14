@@ -12,6 +12,7 @@ def test_workspace_creates_directories(tmp_path):
     assert workspace.cache_dir.exists()
     assert workspace.exports_dir.exists()
     assert workspace.logs_dir.exists()
+    assert workspace.logs_dir == workspace.root / "logs"
 
 
 def test_workspace_creates_project_level_directories(tmp_path):

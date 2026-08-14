@@ -7,15 +7,30 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
+from pathlib import Path
+import tempfile
+import wave
 
 from PySide6.QtWidgets import QApplication
 
-from app.bootstrap import bootstrap_application
+from app.bootstrap import bootstrap_application, build_runtime_report
 
 
-def main() -> int:
-    """启动桌面应用，并返回事件循环的退出码。"""
+def main(argv: list[str] | None = None) -> int:
+    """启动桌面应用，或执行发布包自检并返回退出码。"""
+
+    _ensure_standard_streams()
+    arguments = list(argv if argv is not None else sys.argv[1:])
+    if "--self-test-report" in arguments:
+        index = arguments.index("--self-test-report")
+        if index + 1 >= len(arguments):
+            return 2
+        report_path = Path(arguments[index + 1])
+        verify_asr_load = "--verify-asr-load" in arguments
+        return _run_self_test(report_path, verify_asr_load=verify_asr_load)
 
     # `QApplication` 是桌面界面程序的根对象。
     # 几乎所有界面控件都依赖它，所以必须最先创建。
@@ -32,6 +47,89 @@ def main() -> int:
     # `app.exec()` 会进入事件循环。
     # 从这里开始，按钮点击等用户操作都会通过界面框架的事件和信号机制分发。
     return app.exec()
+
+
+def _ensure_standard_streams() -> None:
+    """为无控制台的 PyInstaller 进程提供可写的标准流占位对象。"""
+
+    # `windowed` 启动器会把标准输出和错误流设为 `None`，
+    # 但少数第三方库仍会尝试调用它们。指向系统空设备即可避免启动崩溃，
+    # 同时不会给用户弹出控制台窗口或泄露日志内容。
+    for stream_name in ("stdout", "stderr"):
+        if getattr(sys, stream_name) is None:
+            setattr(sys, stream_name, open(os.devnull, "w", encoding="utf-8"))
+
+
+def _run_self_test(report_path: Path, verify_asr_load: bool = False) -> int:
+    """写出不依赖控制台的发布包运行报告。"""
+
+    context = bootstrap_application()
+    report = build_runtime_report(context.settings)
+    items = [
+        {"name": item.name, "status": item.status, "message": item.message}
+        for item in report.items
+    ]
+
+    if verify_asr_load:
+        try:
+            _load_asr_model_for_self_test(context)
+            items.append(
+                {"name": "asr_inference", "status": "pass", "message": "ASR 模型加载成功。"}
+            )
+        except Exception as exc:
+            # 自检必须把失败类型写入报告后退出，不能让窗口模式吞掉异常。
+            items.append(
+                {
+                    "name": "asr_inference",
+                    "status": "fail",
+                    "message": f"ASR 模型加载失败：{type(exc).__name__}",
+                }
+            )
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "fail"
+                if any(item["status"] == "fail" for item in items)
+                else report.status,
+                "workspace_root": str(context.workspace.root),
+                "database_path": str(context.workspace.database_path),
+                "items": items,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return 1 if any(item["status"] == "fail" for item in items) else 0
+
+
+def _load_asr_model_for_self_test(context) -> None:
+    """加载内置 ASR 模型并处理一秒静音，验证动态库和模型文件均可用。"""
+
+    silence_path: Path | None = None
+    try:
+        temp_dir = context.workspace.root / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix="zero-caption-self-test-",
+            suffix=".wav",
+            dir=temp_dir,
+            delete=False,
+        ) as handle:
+            silence_path = Path(handle.name)
+        with wave.open(str(silence_path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16_000)
+            audio.writeframes(b"\x00\x00" * 16_000)
+
+        engine = context.container.create_asr_engine()
+        engine.transcribe(silence_path, language="en")
+    finally:
+        if silence_path is not None:
+            silence_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

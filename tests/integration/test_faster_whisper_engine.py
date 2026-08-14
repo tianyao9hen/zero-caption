@@ -127,3 +127,5 @@ def test_container_can_create_real_asr_engine() -> None:
     # 并且暴露出真实适配器类名，方便后续用例直接复用。
     assert isinstance(engine, AsrEngine)
     assert engine.__class__.__name__ == "FasterWhisperEngine"
+    assert Path(engine.model_name).name == "small"
+    assert Path(engine.model_name).is_dir()

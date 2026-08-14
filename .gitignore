@@ -14,4 +14,6 @@ pytest-cache-files*
 .pytest_tmp/
 .idea/
 data/models/
+resources/models/*
+!resources/models/.gitkeep
 data/*.sqlite3

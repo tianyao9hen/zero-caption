@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from config.paths import resource_path
 from config.settings import (
     Settings,
     TranslationSettings,
@@ -107,11 +109,24 @@ class AppContainer:
 
         asr_settings = self.settings.engine.asr
         return FasterWhisperEngine(
-            model_name=asr_settings.model_name,
+            model_name=self._resolve_asr_model(asr_settings.model_name),
             device=asr_settings.device,
             compute_type=asr_settings.compute_type,
             model_cache_dir=self.settings.runtime.model_cache_dir,
         )
+
+    def _resolve_asr_model(self, model_name: str) -> str:
+        """优先使用发布包内置的模型目录，找不到时保留名称回退下载。"""
+
+        configured = Path(model_name)
+        if configured.is_absolute() or configured.exists():
+            return str(configured)
+
+        bundled = resource_path(Path("resources/models") / model_name)
+        required_files = ("config.json", "model.bin", "tokenizer.json")
+        if bundled.is_dir() and all((bundled / name).is_file() for name in required_files):
+            return str(bundled)
+        return model_name
 
     def create_task_service(self) -> TaskService:
         """构建已经接通阶段 2 本地识别链路的任务服务。

@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     # 把仓库根目录放进 `sys.path`，脚本才可以稳定导入 `config`、`app` 这类包。
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from config.paths import resource_path
 from config.settings import Settings, load_settings
 
 
@@ -51,9 +52,8 @@ def probe_runtime(settings: Settings, workspace_root: Path) -> RuntimeReport:
 
     items: list[ProbeItem] = []
 
-    # 第一步：检查命令行媒体工具是否可见。
-    # `shutil.which` 是标准库提供的命令解析方式，适合先做最小环境探测。
-    ffmpeg_path = shutil.which(settings.runtime.ffmpeg_path)
+    # 第一步：检查媒体工具。绝对路径和随包资源优先，开发环境再回退到 PATH。
+    ffmpeg_path = _find_executable(settings.runtime.ffmpeg_path)
     items.append(
         ProbeItem(
             name="ffmpeg",
@@ -62,7 +62,7 @@ def probe_runtime(settings: Settings, workspace_root: Path) -> RuntimeReport:
         )
     )
 
-    ffprobe_path = shutil.which(settings.runtime.ffprobe_path)
+    ffprobe_path = _find_executable(settings.runtime.ffprobe_path)
     items.append(
         ProbeItem(
             name="ffprobe",
@@ -99,7 +99,26 @@ def probe_runtime(settings: Settings, workspace_root: Path) -> RuntimeReport:
         )
     )
 
-    # 第四步：检查模型缓存目录是否可用。
+    # 第四步：检查发布包是否真的携带默认 ASR 模型。
+    # 开发环境可以暂时没有模型，因此这里使用警告；发布自检脚本会把它提升为硬要求。
+    model_dir = _resolve_asr_model_dir(settings.engine.asr.model_name)
+    model_ready = model_dir is not None and all(
+        (model_dir / name).is_file()
+        for name in ("config.json", "model.bin", "tokenizer.json")
+    )
+    items.append(
+        ProbeItem(
+            name="asr_model",
+            status="pass" if model_ready else "warn",
+            message=(
+                f"已检测到内置 ASR 模型：{model_dir}"
+                if model_ready
+                else "未找到内置 ASR 模型。"
+            ),
+        )
+    )
+
+    # 第五步：检查模型缓存目录是否可用。
     # 这里显式创建目录，是为了提前暴露路径权限问题；后续模型下载阶段可以直接复用。
     cache_dir = workspace_root / settings.runtime.model_cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -118,6 +137,27 @@ def probe_runtime(settings: Settings, workspace_root: Path) -> RuntimeReport:
         overall = "warn"
 
     return RuntimeReport(status=overall, items=items)
+
+
+def _find_executable(value: str) -> str | None:
+    """解析绝对路径、应用资源路径和 PATH 中的媒体工具。"""
+
+    configured = Path(value)
+    candidates = [configured] if configured.is_absolute() else [resource_path(configured)]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which(value)
+
+
+def _resolve_asr_model_dir(model_name: str) -> Path | None:
+    """返回已配置或随程序发布的 ASR 模型目录。"""
+
+    configured = Path(model_name)
+    if configured.is_absolute() and configured.is_dir():
+        return configured
+    bundled = resource_path(Path("resources/models") / model_name)
+    return bundled if bundled.is_dir() else None
 
 
 def main() -> int:

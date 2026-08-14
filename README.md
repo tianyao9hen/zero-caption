@@ -32,6 +32,16 @@ python -m app.main
 python -m pytest
 ```
 
+## Windows 便携版
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
+```
+
+构建结果位于 `dist/ZeroCaption/`。便携版已包含 Python、FFmpeg、ffprobe、
+`faster-whisper` 运行依赖和适合笔记本 CPU `int8` 推理的默认 `small` 模型，
+目标电脑无需另行安装这些依赖。
+
 ## Runtime Check
 
 在处理真实视频前，可以先运行：
@@ -54,7 +64,8 @@ python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
 
 ## Complete MVP Pipeline
 
-配置翻译接口地址、模型和 API 密钥环境变量后，可以运行完整无界面主链路：
+可在桌面应用的“设置”页配置翻译接口地址、模型和 API 密钥；也可以使用
+`OPENAI_API_KEY` 环境变量作为密钥回退。配置完成后，可以运行完整无界面主链路：
 
 ```powershell
 python scripts/process_video.py path/to/video.mp4 --source-language auto --target-language zh-CN

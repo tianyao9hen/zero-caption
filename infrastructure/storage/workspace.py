@@ -53,10 +53,11 @@ class WorkspaceManager:
     def logs_dir(self) -> Path:
         """返回应用级日志目录。
 
-        当前它放在 data 根目录之外，这样在开发早期查看日志更直接。
+        日志和数据库一起放入用户工作区，避免安装版从当前工作目录启动时
+        把可写文件落到 `Program Files` 或用户不认识的目录中。
         """
 
-        return Path("logs")
+        return self.root / "logs"
 
     def ensure_structure(self) -> None:
         """创建当前骨架版本运行所需的基础目录结构。"""
