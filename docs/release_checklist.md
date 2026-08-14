@@ -4,6 +4,7 @@
 
 - [ ] 使用受支持的 Python 版本创建干净虚拟环境。
 - [ ] 执行 `scripts/build_windows.ps1`，由脚本安装运行依赖和 `PyInstaller`。
+- [ ] 确认构建脚本可以准备 Inno Setup；它只属于开发期工具，不进入目标电脑依赖。
 - [ ] 确认 `resources/bin/ffmpeg/` 中包含 `ffmpeg.exe` 和 `ffprobe.exe`。
 - [ ] 确认 `resources/models/small/` 中包含 `config.json`、`model.bin` 和 `tokenizer.json`。
 
@@ -16,8 +17,11 @@
 
 ## 打包
 
-- [ ] 执行 `scripts/build_windows.ps1`，脚本会自动运行发布包自检。
+- [ ] 执行 `scripts/build_windows.ps1`，脚本会生成便携目录、安装包和 SHA256 文件。
 - [ ] 或单独执行 `scripts/verify_packaged_app.ps1`，从没有仓库源码的目录启动 `dist/ZeroCaption/ZeroCaption.exe`。
+- [ ] 执行 `scripts/verify_installer.ps1`，确认静默安装、隔离环境启动和卸载清理均通过。
+- [ ] 验收环境必须清除 `PYTHONHOME`、`PYTHONPATH`、虚拟环境和 Hugging Face 缓存变量，并把 PATH 限制到 Windows 系统目录。
+- [ ] 确认安装目录包含 Python、VC 运行库、Qt、CTranslate2、ONNX Runtime、FFmpeg、ffprobe 和 `small` 模型。
 - [ ] 确认首次启动会创建工作区、日志目录和 `zero_caption.sqlite3`。
 - [ ] 确认日志和诊断包不包含原始视频或音频。
 

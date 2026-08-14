@@ -9,6 +9,7 @@ build/
 logs/app.log
 .vscode
 .tmp
+.tools/
 docs/
 pytest-cache-files*
 .pytest_tmp/

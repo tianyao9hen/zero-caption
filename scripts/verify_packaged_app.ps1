@@ -23,12 +23,42 @@ $localAppData = Join-Path $runRoot "local-app-data"
 $reportPath = Join-Path $runRoot "self-test.json"
 New-Item -ItemType Directory -Force -Path $workingDirectory, $localAppData | Out-Null
 
-$oldLocalAppData = $env:LOCALAPPDATA
+$environmentNames = @(
+  'LOCALAPPDATA',
+  'PATH',
+  'PYTHONHOME',
+  'PYTHONPATH',
+  'VIRTUAL_ENV',
+  'CONDA_PREFIX',
+  'HF_HOME',
+  'HUGGINGFACE_HUB_CACHE',
+  'HF_HUB_OFFLINE',
+  'TRANSFORMERS_OFFLINE'
+)
+$oldEnvironment = @{}
+foreach ($name in $environmentNames) {
+  $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
 $selfTest = $null
 $guiProcess = $null
 
 try {
+  # 验收进程只保留 Windows 系统目录，并清除所有本机 Python、虚拟环境和模型缓存提示。
+  # 这样即使开发机已经安装了完整工具链，发布程序也不能无意中借用它们通过测试。
   $env:LOCALAPPDATA = $localAppData
+  $env:PATH = (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot
+  foreach ($name in @(
+    'PYTHONHOME',
+    'PYTHONPATH',
+    'VIRTUAL_ENV',
+    'CONDA_PREFIX',
+    'HF_HOME',
+    'HUGGINGFACE_HUB_CACHE'
+  )) {
+    [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+  }
+  $env:HF_HUB_OFFLINE = '1'
+  $env:TRANSFORMERS_OFFLINE = '1'
 
   # 第一步：自检进程不显示控制台，报告通过 JSON 文件返回。
   $selfTest = Start-Process -FilePath $executable -ArgumentList ('--self-test-report "' + $reportPath + '" --verify-asr-load') -WorkingDirectory $workingDirectory -WindowStyle Hidden -PassThru
@@ -46,6 +76,23 @@ try {
     $item = @($report.items | Where-Object { $_.name -eq $name }) | Select-Object -First 1
     if (-not $item -or $item.status -ne "pass") {
       throw ("packaged self-test item failed: " + $name)
+    }
+  }
+
+  # 报告中的路径检查只能证明文件存在；这里再真正执行包内媒体工具，
+  # 防止发布目录遗漏它们依赖的动态库却仍被误判为可用。
+  foreach ($toolName in @('ffmpeg', 'ffprobe')) {
+    $toolItem = @($report.items | Where-Object { $_.name -eq $toolName }) |
+      Select-Object -First 1
+    $toolProcess = Start-Process `
+      -FilePath $toolItem.message `
+      -ArgumentList '-version' `
+      -WorkingDirectory $workingDirectory `
+      -WindowStyle Hidden `
+      -Wait `
+      -PassThru
+    if ($toolProcess.ExitCode -ne 0) {
+      throw ($toolName + ' from packaged resources failed to execute')
     }
   }
 
@@ -96,5 +143,7 @@ finally {
   if ($selfTest -and -not $selfTest.HasExited) {
     Stop-Process -Id $selfTest.Id -Force
   }
-  $env:LOCALAPPDATA = $oldLocalAppData
+  foreach ($name in $environmentNames) {
+    [Environment]::SetEnvironmentVariable($name, $oldEnvironment[$name], 'Process')
+  }
 }

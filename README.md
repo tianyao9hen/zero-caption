@@ -32,15 +32,21 @@ python -m app.main
 python -m pytest
 ```
 
-## Windows 便携版
+## Windows 发布包
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
 ```
 
-构建结果位于 `dist/ZeroCaption/`。便携版已包含 Python、FFmpeg、ffprobe、
-`faster-whisper` 运行依赖和适合笔记本 CPU `int8` 推理的默认 `small` 模型，
-目标电脑无需另行安装这些依赖。
+构建脚本会同时生成：
+
+- `dist/ZeroCaption/`：免安装便携目录。
+- `dist/installer/ZeroCaption-0.1.0-win64-setup.exe`：推荐给最终用户的单用户安装包。
+
+两个版本均已包含 Python、VC 运行库、Qt、FFmpeg、ffprobe、`faster-whisper`
+运行依赖，以及适合笔记本 CPU `int8` 推理的默认 `small` 模型。目标电脑无需安装
+Python、FFmpeg 或其他本地应用。字幕翻译仍需要用户在设置页配置可访问的大模型 API，
+但不会要求安装任何翻译客户端。
 
 ## Runtime Check
 
