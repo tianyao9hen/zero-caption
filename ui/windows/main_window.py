@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from config.settings import Settings, TranslationSettings
+from config.settings import EngineSettings, Settings
+from core.dto.asr_dto import AsrHardwareInfoDTO
 from core.dto.pipeline_dto import ProcessVideoResult
 from core.services.task_service import TaskService
 from infrastructure.storage.workspace import WorkspaceManager
@@ -44,7 +45,8 @@ class MainWindow(QMainWindow):
         workspace: WorkspaceManager,
         task_service: TaskService,
         task_service_factory: Callable[[], TaskService],
-        settings_updater: Callable[[TranslationSettings], Settings],
+        settings_updater: Callable[[EngineSettings], Settings],
+        asr_hardware_info: AsrHardwareInfoDTO,
         logger: logging.Logger,
         progress_bus: ProgressBus,
     ) -> None:
@@ -67,7 +69,10 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.projects_page = ProjectsPage(workspace=workspace, task_service=task_service)
         self.tasks_page = TasksPage(task_service=task_service)
-        self.settings_page = SettingsPage(settings=settings)
+        self.settings_page = SettingsPage(
+            settings=settings,
+            asr_hardware_info=asr_hardware_info,
+        )
         self.status_widget = StatusBarWidget(task_service=task_service)
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(100)
@@ -84,7 +89,7 @@ class MainWindow(QMainWindow):
         # 这里导航控件发出页面索引，页面栈据此切换到对应页。
         self.navigation.page_changed.connect(self.stack.setCurrentIndex)
         self.settings_page.save_requested.connect(
-            self._handle_translation_settings_save
+            self._handle_engine_settings_save
         )
 
         root = QWidget()
@@ -164,10 +169,10 @@ class MainWindow(QMainWindow):
             self._pipeline_runner.deleteLater()
             self._pipeline_runner = None
 
-    def _handle_translation_settings_save(self, value: object) -> None:
-        """保存翻译配置，并重建后续任务使用的应用服务。"""
+    def _handle_engine_settings_save(self, value: object) -> None:
+        """保存识别与翻译配置，并重建后续任务使用的服务。"""
 
-        if not isinstance(value, TranslationSettings):
+        if not isinstance(value, EngineSettings):
             self.settings_page.show_save_result(False, "设置数据格式不正确。")
             return
 
@@ -178,17 +183,15 @@ class MainWindow(QMainWindow):
             # 第二步：重新装配任务服务。已经运行的后台任务仍持有旧服务，
             # 新服务只影响用户随后发起的任务，不会中途替换正在执行的适配器。
             task_service = self.task_service_factory()
-        except (OSError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             # 日志只记录异常类型和路径类信息，配置对象及 API 密钥不会进入日志。
-            self.logger.exception("保存大模型翻译设置失败")
+            self.logger.exception("保存识别与大模型设置失败")
             self.settings_page.show_save_result(False, f"保存失败：{exc}")
             return
 
         self.settings = updated_settings
         self.task_service = task_service
-        self.settings_page.apply_saved_settings(
-            updated_settings.engine.translation
-        )
-        message = "大模型设置已保存，后续任务将使用新配置。"
+        self.settings_page.apply_saved_engine_settings(updated_settings.engine)
+        message = "引擎设置已保存，后续任务将使用新配置。"
         self.settings_page.show_save_result(True, message)
         self.status_widget.show_message(message)

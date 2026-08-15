@@ -112,13 +112,14 @@ def prepare_model(model_name: str, output_root: Path) -> Path:
 
 
 def main() -> int:
-    """读取默认模型配置并准备发布目录。"""
+    """读取发布模型清单，并逐个准备到只读资源目录。"""
 
     parser = argparse.ArgumentParser(description="准备 Zero Caption 内置 ASR 模型")
     parser.add_argument(
         "--model",
+        action="append",
         default=None,
-        help="覆盖默认模型名，例如 small；不传时读取 config/default.toml。",
+        help="只准备指定模型；可重复传入。不传时准备默认清单中的全部模型。",
     )
     parser.add_argument(
         "--output-root",
@@ -129,8 +130,9 @@ def main() -> int:
     args = parser.parse_args()
 
     default_settings = load_settings(resource_path("config/default.toml"))
-    model_name = args.model or default_settings.engine.asr.model_name
-    prepare_model(model_name=model_name, output_root=args.output_root)
+    model_names = args.model or list(default_settings.engine.asr.bundled_models)
+    for model_name in model_names:
+        prepare_model(model_name=model_name, output_root=args.output_root)
     return 0
 
 

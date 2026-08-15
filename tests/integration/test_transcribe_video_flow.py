@@ -183,6 +183,11 @@ class RecordingAsrEngine:
             ),
         ]
 
+    def runtime_summary(self) -> str:
+        """模拟适配器向任务页报告实际运行参数。"""
+
+        return "实际使用 medium + CUDA + float16 完成识别。"
+
 
 class RecordingSrtWriter:
     """记录 `SRT` 写出调用，并生成可检查的字幕文件。"""
@@ -352,6 +357,8 @@ def test_transcribe_video_flow_creates_project_and_writes_source_srt(
     assert result.source_segments == saved_segments
     assert result.task.status is TaskStatus.SUCCEEDED
     assert result.task.checkpoint is TaskCheckpoint.TRANSCRIBED
+    assert result.runtime_message == "实际使用 medium + CUDA + float16 完成识别。"
+    assert result.task.message == result.runtime_message
     assert projects.get_by_id(create_result.project.project_id).status is ProjectStatus.PROCESSING
     assert expected_audio_path.exists()
     assert expected_srt_path.exists()

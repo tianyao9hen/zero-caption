@@ -6,8 +6,11 @@
 """
 
 from config.settings import (
+    AsrSettings,
+    EngineSettings,
     TranslationSettings,
     load_settings,
+    save_engine_settings,
     save_translation_settings,
 )
 from core.domain.enums import ExportMode
@@ -27,6 +30,9 @@ def test_load_settings_defaults_when_missing(tmp_path, monkeypatch):
     assert settings.app_name == "Zero Caption"
     assert str(settings.workspace_root) == "data"
     assert settings.engine.asr.provider == "faster-whisper"
+    assert settings.engine.asr.model_name == "auto"
+    assert settings.engine.asr.device == "auto"
+    assert settings.engine.asr.bundled_models == ("small", "medium")
     assert settings.engine.translation.api_key_env == "OPENAI_API_KEY"
     assert settings.engine.translation.api_key == ""
     assert settings.runtime.ffmpeg_path == "resources/bin/ffmpeg/ffmpeg.exe"
@@ -135,7 +141,7 @@ api_key = "local-secret"
     assert settings.engine.translation.model == "caption-model"
     assert settings.engine.translation.api_key == "local-secret"
     assert settings.engine.translation.max_retries == 2
-    assert settings.engine.asr.model_name == "small"
+    assert settings.engine.asr.model_name == "auto"
     assert settings.runtime.ffmpeg_path == "resources/bin/ffmpeg/ffmpeg.exe"
 
 
@@ -220,3 +226,36 @@ def test_translation_settings_reports_whether_required_values_exist(monkeypatch)
     assert configured_in_app.is_configured() is True
     monkeypatch.setenv("TEST_CAPTION_API_KEY", "environment-secret")
     assert configured_in_environment.is_configured() is True
+
+
+def test_save_engine_settings_round_trips_asr_and_translation(tmp_path) -> None:
+    """设置页保存后，本地识别选择和大模型配置都应完整保留。"""
+
+    # arrange：模型清单属于随包配置，不写入用户文件；加载时应继续从默认值补齐。
+    engine = EngineSettings(
+        asr=AsrSettings(
+            model_name="medium",
+            device="cuda",
+            compute_type="float16",
+            allow_cpu_fallback=True,
+        ),
+        translation=TranslationSettings(
+            base_url="https://llm.example/v1",
+            model="caption-model",
+            api_key="secret",
+        ),
+    )
+    target = tmp_path / "settings.toml"
+
+    # act
+    save_engine_settings(engine, target)
+    reloaded = load_settings(user_path=target).engine
+
+    # assert
+    assert reloaded.asr.model_name == "medium"
+    assert reloaded.asr.device == "cuda"
+    assert reloaded.asr.compute_type == "float16"
+    assert reloaded.asr.allow_cpu_fallback is True
+    assert reloaded.asr.bundled_models == ("small", "medium")
+    assert reloaded.translation.model == "caption-model"
+    assert reloaded.translation.api_key == "secret"

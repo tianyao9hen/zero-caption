@@ -5,5 +5,6 @@ core 层只依赖 `AsrEngine` 端口，不应该知道这里使用的是哪一�
 """
 
 from infrastructure.asr.faster_whisper_engine import FasterWhisperEngine
+from infrastructure.asr.hardware_probe import CTranslate2HardwareProbe
 
-__all__ = ["FasterWhisperEngine"]
+__all__ = ["CTranslate2HardwareProbe", "FasterWhisperEngine"]

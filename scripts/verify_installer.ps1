@@ -61,10 +61,13 @@ try {
     (Join-Path $installRoot '_internal\PySide6\Qt6Core.dll'),
     (Join-Path $installRoot '_internal\PySide6\plugins\platforms\qwindows.dll'),
     (Join-Path $installRoot '_internal\ctranslate2\ctranslate2.dll'),
+    (Join-Path $installRoot '_internal\nvidia\cublas\bin\cublas64_12.dll'),
+    (Join-Path $installRoot '_internal\nvidia\cublas\bin\cublasLt64_12.dll'),
     (Join-Path $installRoot '_internal\onnxruntime\capi\onnxruntime.dll'),
     (Join-Path $installRoot '_internal\resources\bin\ffmpeg\ffmpeg.exe'),
     (Join-Path $installRoot '_internal\resources\bin\ffmpeg\ffprobe.exe'),
-    (Join-Path $installRoot '_internal\resources\models\small\model.bin')
+    (Join-Path $installRoot '_internal\resources\models\small\model.bin'),
+    (Join-Path $installRoot '_internal\resources\models\medium\model.bin')
   )) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
       throw ('安装后缺少必需的内置运行文件：' + $requiredPath)

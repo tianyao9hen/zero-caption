@@ -73,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"项目目录：{create_result.project.workspace_dir}")
     print(f"识别片段：{len(result.source_segments)}")
+    print(f"运行方式：{result.runtime_message or '识别引擎未提供运行摘要。'}")
     print(f"原文字幕：{result.subtitle_path}")
     return 0
 

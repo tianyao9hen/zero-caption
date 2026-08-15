@@ -3,6 +3,8 @@ provider = "faster-whisper"
 model_name = "small"
 device = "cpu"
 compute_type = "int8"
+bundled_models = ["small", "medium"]
+allow_cpu_fallback = true
 
 [task]
 max_concurrency = 1

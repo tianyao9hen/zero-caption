@@ -43,14 +43,16 @@ if (-not $SkipModelDownload) {
   Invoke-Python -Arguments $modelArguments
 }
 
-$defaultModel = (& $PythonPath -c "from config.settings import load_settings; print(load_settings('config/default.toml').engine.asr.model_name)").Trim()
-if (-not $defaultModel) {
-  throw 'default ASR model name is empty'
+$bundledModels = @(& $PythonPath -c "from config.settings import load_settings; print('\n'.join(load_settings('config/default.toml').engine.asr.bundled_models))")
+if (-not $bundledModels) {
+  throw 'bundled ASR model list is empty'
 }
-$modelDirectory = Join-Path $repoRoot (Join-Path 'resources\models' $defaultModel)
-foreach ($requiredModelFile in @('config.json', 'model.bin', 'tokenizer.json')) {
-  if (-not (Test-Path -LiteralPath (Join-Path $modelDirectory $requiredModelFile))) {
-    throw ('missing bundled ASR model file: ' + $requiredModelFile)
+foreach ($modelName in $bundledModels) {
+  $modelDirectory = Join-Path $repoRoot (Join-Path 'resources\models' $modelName)
+  foreach ($requiredModelFile in @('config.json', 'model.bin', 'tokenizer.json')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $modelDirectory $requiredModelFile))) {
+      throw ('missing bundled ASR model file: ' + $modelName + '/' + $requiredModelFile)
+    }
   }
 }
 $buildArguments = @('-m', 'PyInstaller', '--noconfirm', '--clean', 'ZeroCaption.spec')

@@ -17,6 +17,7 @@ import wave
 from PySide6.QtWidgets import QApplication
 
 from app.bootstrap import bootstrap_application, build_runtime_report
+from core.ports.asr import AsrRuntimeReporter, AsrRuntimeVerifier
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,9 +73,13 @@ def _run_self_test(report_path: Path, verify_asr_load: bool = False) -> int:
 
     if verify_asr_load:
         try:
-            _load_asr_model_for_self_test(context)
+            runtime_message = _load_asr_model_for_self_test(context)
             items.append(
-                {"name": "asr_inference", "status": "pass", "message": "ASR 模型加载成功。"}
+                {
+                    "name": "asr_inference",
+                    "status": "pass",
+                    "message": f"ASR 真实推理成功：{runtime_message}",
+                }
             )
         except Exception as exc:
             # 自检必须把失败类型写入报告后退出，不能让窗口模式吞掉异常。
@@ -105,7 +110,7 @@ def _run_self_test(report_path: Path, verify_asr_load: bool = False) -> int:
     return 1 if any(item["status"] == "fail" for item in items) else 0
 
 
-def _load_asr_model_for_self_test(context) -> None:
+def _load_asr_model_for_self_test(context) -> str:
     """加载内置 ASR 模型并处理一秒静音，验证动态库和模型文件均可用。"""
 
     silence_path: Path | None = None
@@ -126,7 +131,15 @@ def _load_asr_model_for_self_test(context) -> None:
             audio.writeframes(b"\x00\x00" * 16_000)
 
         engine = context.container.create_asr_engine()
+        if isinstance(engine, AsrRuntimeVerifier):
+            return engine.verify_runtime(silence_path, language="en")
+
+        # 兼容未来只实现基础端口的识别适配器。它们仍可完成最小自检，
+        # 但若没有运行摘要，就明确返回未知参数而不是猜测设备。
         engine.transcribe(silence_path, language="en")
+        if isinstance(engine, AsrRuntimeReporter):
+            return engine.runtime_summary()
+        return "识别适配器未提供实际运行参数。"
     finally:
         if silence_path is not None:
             silence_path.unlink(missing_ok=True)

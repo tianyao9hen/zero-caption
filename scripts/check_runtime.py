@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from config.paths import resource_path
 from config.settings import Settings, load_settings
+from infrastructure.asr.hardware_probe import CTranslate2HardwareProbe
 
 
 @dataclass(slots=True)
@@ -97,26 +98,45 @@ def probe_runtime(settings: Settings, workspace_root: Path) -> RuntimeReport:
         )
     )
 
-    # 第四步：检查发布包是否真的携带默认 ASR 模型。
-    # 开发环境可以暂时没有模型，因此这里使用警告；发布自检脚本会把它提升为硬要求。
-    model_dir = _resolve_asr_model_dir(settings.engine.asr.model_name)
-    model_ready = model_dir is not None and all(
-        (model_dir / name).is_file()
-        for name in ("config.json", "model.bin", "tokenizer.json")
-    )
+    # 第四步：检查发布清单中的每个 ASR 模型是否已经完整准备。
+    model_directories = {
+        model_name: _resolve_asr_model_dir(model_name)
+        for model_name in settings.engine.asr.bundled_models
+    }
+    missing_models = [
+        model_name
+        for model_name, model_dir in model_directories.items()
+        if model_dir is None
+        or not all(
+            (model_dir / name).is_file()
+            for name in ("config.json", "model.bin", "tokenizer.json")
+        )
+    ]
+    model_ready = not missing_models
     items.append(
         ProbeItem(
             name="asr_model",
             status="pass" if model_ready else "warn",
             message=(
-                f"已检测到内置 ASR 模型：{model_dir}"
+                "已检测到内置 ASR 模型："
+                + "、".join(settings.engine.asr.bundled_models)
                 if model_ready
-                else "未找到内置 ASR 模型。"
+                else "缺少内置 ASR 模型：" + "、".join(missing_models)
             ),
         )
     )
 
-    # 第五步：检查模型缓存目录是否可用。
+    # 第五步：展示真实硬件结论。CPU 是有效回退，因此没有 CUDA 也不阻断启动。
+    hardware_info = CTranslate2HardwareProbe().probe()
+    items.append(
+        ProbeItem(
+            name="asr_hardware",
+            status="pass",
+            message=hardware_info.diagnostic_message,
+        )
+    )
+
+    # 第六步：检查模型缓存目录是否可用。
     # 这里显式创建目录，是为了提前暴露路径权限问题；后续模型下载阶段可以直接复用。
     cache_dir = workspace_root / settings.runtime.model_cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)

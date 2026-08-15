@@ -20,12 +20,18 @@ from core.domain.enums import ExportMode
 
 @dataclass(slots=True)
 class AsrSettings:
-    """描述本地识别引擎的配置。"""
+    """描述本地识别引擎的用户选择和发布模型边界。
+
+    `auto` 表示应用根据实际硬件选择安全组合；`bundled_models` 只描述
+    软件已经准备好的模型，运行任务时不会临时访问网络下载模型。
+    """
 
     provider: str = "faster-whisper"
-    model_name: str = "small"
-    device: str = "cpu"
-    compute_type: str = "int8"
+    model_name: str = "auto"
+    device: str = "auto"
+    compute_type: str = "auto"
+    bundled_models: tuple[str, ...] = ("small", "medium")
+    allow_cpu_fallback: bool = True
 
 
 @dataclass(slots=True)
@@ -172,7 +178,7 @@ def save_translation_settings(
     settings: TranslationSettings,
     path: str | Path | None = None,
 ) -> Path:
-    """把用户可编辑的大模型翻译设置写入本地 `TOML` 文件。
+    """兼容旧调用方，只更新本地 `TOML` 中的大模型翻译设置。
 
     参数：
         settings：设置页收集到的翻译配置。
@@ -183,29 +189,68 @@ def save_translation_settings(
         实际写入的配置文件路径。
 
     副作用：
-        会创建父目录，并通过临时文件替换方式写入配置，降低写入中断时
-        留下半个配置文件的风险。
+        会保留已有的 ASR 选择，并通过统一引擎设置入口原子替换配置文件。
     """
 
-    _validate_translation_settings(settings)
+    target = Path(path) if path is not None else user_data_path("settings.toml")
+
+    # 兼容旧调用方时先读取已有识别选择，再只替换翻译分组。
+    # 这样旧接口不会意外清除用户刚保存的 GPU 和模型设置。
+    current = load_settings(user_path=target)
+    return save_engine_settings(
+        EngineSettings(
+            asr=current.engine.asr,
+            translation=settings,
+            export=current.engine.export,
+        ),
+        target,
+    )
+
+
+def save_engine_settings(
+    settings: EngineSettings,
+    path: str | Path | None = None,
+) -> Path:
+    """持久化用户可编辑的本地识别和大模型翻译设置。
+
+    参数：
+        settings：设置页提交的完整引擎配置。
+        path：可选输出路径；生产环境默认使用当前用户配置文件。
+
+    返回：
+        实际写入的 `TOML` 文件路径。
+
+    副作用：
+        会原子替换用户配置文件。发布模型清单仍以随包默认配置为准，
+        用户只能选择已经内置的模型，不能通过界面注入任意下载地址。
+    """
+
+    _validate_asr_settings(settings.asr)
+    _validate_translation_settings(settings.translation)
     target = Path(path) if path is not None else user_data_path("settings.toml")
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # 当前用户配置文件只承载界面可编辑的大模型设置。
-    # 运行目录、工作区等安装期配置仍来自随程序发布的默认文件，
-    # 避免把已经解析成绝对路径的运行时值错误写回用户配置。
+    asr = settings.asr
+    translation = settings.translation
     content = "\n".join(
         [
+            "[engine.asr]",
+            f"provider = {_toml_string(asr.provider)}",
+            f"model_name = {_toml_string(asr.model_name)}",
+            f"device = {_toml_string(asr.device)}",
+            f"compute_type = {_toml_string(asr.compute_type)}",
+            f"allow_cpu_fallback = {str(asr.allow_cpu_fallback).lower()}",
+            "",
             "[engine.translation]",
-            f"provider = {_toml_string(settings.provider)}",
-            f"base_url = {_toml_string(settings.base_url)}",
-            f"model = {_toml_string(settings.model)}",
-            f"api_key = {_toml_string(settings.api_key)}",
-            f"api_key_env = {_toml_string(settings.api_key_env)}",
-            f"timeout_seconds = {settings.timeout_seconds}",
-            f"max_retries = {settings.max_retries}",
-            f"max_batch_segments = {settings.max_batch_segments}",
-            f"max_batch_characters = {settings.max_batch_characters}",
+            f"provider = {_toml_string(translation.provider)}",
+            f"base_url = {_toml_string(translation.base_url)}",
+            f"model = {_toml_string(translation.model)}",
+            f"api_key = {_toml_string(translation.api_key)}",
+            f"api_key_env = {_toml_string(translation.api_key_env)}",
+            f"timeout_seconds = {translation.timeout_seconds}",
+            f"max_retries = {translation.max_retries}",
+            f"max_batch_segments = {translation.max_batch_segments}",
+            f"max_batch_characters = {translation.max_batch_characters}",
             "",
         ]
     )
@@ -252,6 +297,18 @@ def _settings_from_data(data: dict[str, Any]) -> Settings:
                 model_name=asr.get("model_name", settings.engine.asr.model_name),
                 device=asr.get("device", settings.engine.asr.device),
                 compute_type=asr.get("compute_type", settings.engine.asr.compute_type),
+                bundled_models=tuple(
+                    asr.get(
+                        "bundled_models",
+                        settings.engine.asr.bundled_models,
+                    )
+                ),
+                allow_cpu_fallback=bool(
+                    asr.get(
+                        "allow_cpu_fallback",
+                        settings.engine.asr.allow_cpu_fallback,
+                    )
+                ),
             ),
             translation=TranslationSettings(
                 provider=translation.get("provider", settings.engine.translation.provider),
@@ -348,6 +405,24 @@ def _validate_translation_settings(settings: TranslationSettings) -> None:
         raise ValueError("单批字幕条数必须大于 0。")
     if settings.max_batch_characters <= 0:
         raise ValueError("单批字幕字符数必须大于 0。")
+
+
+def _validate_asr_settings(settings: AsrSettings) -> None:
+    """验证识别设置只引用软件支持并已准备的选项。"""
+
+    if not settings.bundled_models:
+        raise ValueError("至少需要准备一个本地识别模型。")
+    if settings.model_name not in {"auto", *settings.bundled_models}:
+        raise ValueError("识别模型必须选择自动或软件已内置的模型。")
+    if settings.device not in {"auto", "cpu", "cuda"}:
+        raise ValueError("识别设备必须是自动、CPU 或 CUDA。")
+    if settings.compute_type not in {
+        "auto",
+        "int8",
+        "float16",
+        "int8_float16",
+    }:
+        raise ValueError("识别精度不是软件支持的选项。")
 
 
 def _toml_string(value: str) -> str:

@@ -16,6 +16,7 @@ import pytest
 
 from app.container import AppContainer
 from config.settings import Settings
+from core.dto.asr_dto import AsrHardwareInfoDTO
 from core.dto.subtitle_dto import SubtitleSegmentDTO
 from core.ports.asr import AsrEngine
 from infrastructure.media.ffmpeg import FFmpegAdapter
@@ -110,7 +111,7 @@ def test_faster_whisper_engine_returns_subtitle_segment_dto_list(workspace_temp_
 
 
 def test_container_can_create_real_asr_engine() -> None:
-    """容器应当能装配出符合 `AsrEngine` 端口的真实实现。"""
+    """容器应按 GPU 推荐装配内置 `medium + CUDA + float16`。"""
 
     # arrange：这里不直接跑识别，只验证 app 层是否已经完成
     # “配置 -> 具体适配器”的装配职责。
@@ -118,6 +119,17 @@ def test_container_can_create_real_asr_engine() -> None:
         settings=Settings(),
         workspace=WorkspaceManager(Path("data")),
         logger=logging.getLogger("test"),
+        asr_hardware_info=AsrHardwareInfoDTO(
+            cuda_available=True,
+            device_count=1,
+            gpu_name="测试 GPU",
+            vram_mb=6_144,
+            supported_compute_types=("float16", "int8_float16", "int8"),
+            recommended_model="medium",
+            recommended_device="cuda",
+            recommended_compute_type="float16",
+            diagnostic_message="测试推荐。",
+        ),
     )
 
     # act：从容器中拿到当前阶段约定的本地 ASR 实现。
@@ -127,5 +139,8 @@ def test_container_can_create_real_asr_engine() -> None:
     # 并且暴露出真实适配器类名，方便后续用例直接复用。
     assert isinstance(engine, AsrEngine)
     assert engine.__class__.__name__ == "FasterWhisperEngine"
-    assert Path(engine.model_name).name == "small"
+    assert Path(engine.model_name).name == "medium"
     assert Path(engine.model_name).is_dir()
+    assert engine.device == "cuda"
+    assert engine.compute_type == "float16"
+    assert Path(engine.fallback_model_name).name == "small"

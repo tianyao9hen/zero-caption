@@ -79,6 +79,19 @@ try {
     }
   }
 
+  # 在有 CUDA 的构建机上，自检必须真正使用 GPU，而不能依赖 CPU 回退蒙混通过。
+  # CPU 机器仍以 CPU 成功推理为有效结果，因此这里只在硬件建议包含 CUDA 时收紧条件。
+  $hardwareItem = @($report.items | Where-Object { $_.name -eq 'asr_hardware' }) |
+    Select-Object -First 1
+  $inferenceItem = @($report.items | Where-Object { $_.name -eq 'asr_inference' }) |
+    Select-Object -First 1
+  if (
+    $hardwareItem.message -match '推荐 .+ \+ CUDA \+' -and
+    $inferenceItem.message -notmatch '\+ CUDA \+'
+  ) {
+    throw ('packaged ASR fell back from CUDA unexpectedly: ' + $inferenceItem.message)
+  }
+
   # 报告中的路径检查只能证明文件存在；这里再真正执行包内媒体工具，
   # 防止发布目录遗漏它们依赖的动态库却仍被误判为可用。
   foreach ($toolName in @('ffmpeg', 'ffprobe')) {
@@ -96,7 +109,7 @@ try {
     }
   }
 
-  # 自检报告写入后，进程仍需要一点时间释放 `small` 模型占用的内存和文件句柄。
+  # 自检报告写入后，进程仍需要一点时间释放识别模型占用的内存和文件句柄。
   # 等待它完整退出后再启动 GUI，可以避免两份模型短时间并存导致笔记本内存压力过大。
   if (-not $selfTest.WaitForExit(30000)) {
     throw 'packaged self-test did not exit within 30 seconds after writing its report'

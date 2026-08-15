@@ -5,29 +5,30 @@
 from pathlib import Path
 import tomllib
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 
 
 repo_root = Path.cwd().resolve()
-# 构建配置直接读取应用默认模型，保证校验脚本、运行时配置和打包资源始终使用同一名称。
+# 构建配置直接读取应用发布模型清单，保证校验脚本、运行时和打包资源一致。
 with (repo_root / "config" / "default.toml").open("rb") as config_file:
-    default_model = tomllib.load(config_file)["engine"]["asr"]["model_name"]
+    bundled_models = tomllib.load(config_file)["engine"]["asr"]["bundled_models"]
 
 # 第一步：收集会通过动态库或运行时导入加载的本地识别依赖。
 # 这些包不能只依赖静态导入分析，否则安装版可能在真正识别时才缺少 DLL。
 # 只把运行时真正需要的资源加入安装包。
-# 模型目录可能同时存在多个本地版本，若直接打包整个 `resources`，会把未选中的模型也复制进去，
-# 既增加安装包体积，又让用户误以为程序会自动使用它们。
 datas: list[tuple[str, str]] = [
     (str(repo_root / "config" / "default.toml"), "config"),
     (str(repo_root / "resources" / "bin"), "resources/bin"),
     (str(repo_root / "resources" / "icons"), "resources/icons"),
     (str(repo_root / "resources" / "themes"), "resources/themes"),
-    (
-        str(repo_root / "resources" / "models" / default_model),
-        f"resources/models/{default_model}",
-    ),
 ]
+for model_name in bundled_models:
+    datas.append(
+        (
+            str(repo_root / "resources" / "models" / model_name),
+            f"resources/models/{model_name}",
+        )
+    )
 binaries: list[tuple[str, str]] = []
 hiddenimports: list[str] = []
 for package_name in (
@@ -42,6 +43,10 @@ for package_name in (
     datas.extend(package_datas)
     binaries.extend(package_binaries)
     hiddenimports.extend(package_hiddenimports)
+
+# `CTranslate2` 在第一次真实 CUDA 运算时才加载 `cuBLAS`，静态分析无法发现。
+# 保留 NVIDIA 包内原有的子目录，运行时辅助模块才能注册准确的 DLL 路径。
+binaries.extend(collect_dynamic_libs("nvidia.cublas"))
 
 
 analysis = Analysis(

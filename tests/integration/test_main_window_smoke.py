@@ -5,8 +5,15 @@ import logging
 from PySide6.QtWidgets import QApplication
 
 from app.container import AppContainer
-from config.settings import Settings
+from config.settings import EngineSettings, Settings
+from core.dto.asr_dto import AsrHardwareInfoDTO
 from infrastructure.storage.workspace import WorkspaceManager
+
+
+def cpu_hardware_info() -> AsrHardwareInfoDTO:
+    """让窗口烟测固定走不依赖 GPU 的 `small + CPU` 路径。"""
+
+    return AsrHardwareInfoDTO.cpu_only("测试固定使用 CPU。")
 
 
 def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
@@ -22,6 +29,7 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
         settings=settings,
         workspace=workspace,
         logger=logging.getLogger("test-main-window"),
+        asr_hardware_info=cpu_hardware_info(),
     )
 
     # act：通过容器创建完整主窗口，而不是手工绕过装配层。
@@ -55,13 +63,14 @@ def test_main_window_refreshes_task_service_after_translation_settings_save(
         return tmp_path / "settings.toml"
 
     monkeypatch.setattr(
-        "app.container.save_translation_settings",
+        "app.container.save_engine_settings",
         save_to_temporary_file,
     )
     container = AppContainer(
         settings=Settings(workspace_root=workspace.root),
         workspace=workspace,
         logger=logging.getLogger("test-settings-refresh"),
+        asr_hardware_info=cpu_hardware_info(),
     )
     window = container.create_main_window()
     original_service = window.task_service
@@ -75,7 +84,8 @@ def test_main_window_refreshes_task_service_after_translation_settings_save(
 
     # assert：配置已交给持久化入口，窗口和容器同时切换到新配置和新服务。
     assert len(saved_settings) == 1
-    assert saved_settings[0].api_key == "configured-secret"
+    assert isinstance(saved_settings[0], EngineSettings)
+    assert saved_settings[0].translation.api_key == "configured-secret"
     assert container.settings.engine.translation.model == "caption-model"
     assert window.settings.engine.translation.base_url == "https://llm.example/v1"
     assert window.task_service is not original_service

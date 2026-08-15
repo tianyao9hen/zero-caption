@@ -53,6 +53,7 @@ class TranscribeVideoResult:
     media: MediaProbeResultDTO | None = None
     reused_audio: bool = False
     reused_transcript: bool = False
+    runtime_message: str = ""
 
 
 @dataclass(slots=True)

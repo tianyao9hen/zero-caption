@@ -43,3 +43,31 @@ def test_modelscope_download_replaces_temporary_files(monkeypatch, tmp_path) -> 
         output_path = target / filename
         assert output_path.read_bytes() == payload
         assert not output_path.with_suffix(f"{output_path.suffix}.part").exists()
+
+
+def test_main_prepares_every_model_from_default_bundle(monkeypatch, tmp_path) -> None:
+    """未指定 `--model` 时，构建准备入口应处理 `small` 和 `medium`。"""
+
+    # arrange：替换真正下载函数，只记录主入口准备顺序。
+    prepared: list[tuple[str, object]] = []
+
+    def remember_model(model_name, output_root):
+        prepared.append((model_name, output_root))
+        return output_root / model_name
+
+    monkeypatch.setattr(prepare_asr_model, "prepare_model", remember_model)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "prepare_asr_model.py",
+            "--output-root",
+            str(tmp_path / "models"),
+        ],
+    )
+
+    # act
+    exit_code = prepare_asr_model.main()
+
+    # assert：发布顺序来自默认清单，未来增加模型时这个测试会提醒同步验收。
+    assert exit_code == 0
+    assert [name for name, _ in prepared] == ["small", "medium"]

@@ -10,6 +10,7 @@ Windows 本地优先的视频字幕生成与翻译桌面应用。
 - 配置、日志、运行时探针和项目工作区
 - FFmpeg / ffprobe 适配器
 - faster-whisper 本地语音识别适配器
+- NVIDIA GPU 自动探测、CPU 回退和 `small` / `medium` 模型切换
 - 字幕去重、时间轴规整和 SRT 写出
 - 无界面的单视频识别主链路与缓存复用
 - 云端字幕翻译、外挂字幕和 FFmpeg 烧录导出
@@ -43,10 +44,13 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
 - `dist/ZeroCaption/`：免安装便携目录。
 - `dist/installer/ZeroCaption-0.1.0-win64-setup.exe`：推荐给最终用户的单用户安装包。
 
-两个版本均已包含 Python、VC 运行库、Qt、FFmpeg、ffprobe、`faster-whisper`
-运行依赖，以及适合笔记本 CPU `int8` 推理的默认 `small` 模型。目标电脑无需安装
-Python、FFmpeg 或其他本地应用。字幕翻译仍需要用户在设置页配置可访问的大模型 API，
-但不会要求安装任何翻译客户端。
+两个版本均已包含 Python、VC 运行库、Qt、FFmpeg、ffprobe、`faster-whisper`、
+`cuBLAS 12` 运行依赖，以及 `small`、`medium` 两套本地模型。自动模式会在可用的 5GB 以上
+NVIDIA CUDA GPU 上选择 `medium + float16`，无可用 GPU 时选择 `small + CPU + int8`。
+用户也可以在设置页自行选择模型、设备和精度；CUDA 初始化失败时默认自动回退 CPU。
+目标电脑无需安装 Python、FFmpeg、完整 CUDA Toolkit 或临时下载识别模型，只需保持
+NVIDIA 显卡驱动可用。字幕翻译仍需要用户配置可访问的
+大模型 API，但不会要求安装任何翻译客户端。
 
 ## Runtime Check
 
@@ -56,7 +60,8 @@ Python、FFmpeg 或其他本地应用。字幕翻译仍需要用户在设置页�
 python scripts/check_runtime.py
 ```
 
-这个脚本会检查 `ffmpeg`、`ffprobe`、`faster-whisper` 以及关键翻译配置是否已经准备好。
+这个脚本会检查 `ffmpeg`、`ffprobe`、`faster-whisper`、两套内置模型、
+CUDA 硬件建议以及关键翻译配置是否已经准备好。
 
 ## Local Transcription
 

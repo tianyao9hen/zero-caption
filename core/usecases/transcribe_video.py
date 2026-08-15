@@ -14,7 +14,7 @@ from uuid import uuid4
 from core.domain.entities import Task
 from core.domain.enums import TaskCheckpoint
 from core.dto.subtitle_dto import TranscribeVideoInput, TranscribeVideoResult
-from core.ports.asr import AsrEngine
+from core.ports.asr import AsrEngine, AsrRuntimeReporter
 from core.ports.events import TaskEventPublisher
 from core.ports.media import AudioExtractor, MediaProbe
 from core.ports.repository import ProjectRepository, SubtitleRepository, TaskRepository
@@ -83,6 +83,7 @@ class TranscribeVideo:
         subtitle_path: Path | None = None
         reused_audio = False
         reused_transcript = False
+        runtime_message = ""
 
         try:
             # 第一步：如果调用方没有准备音频，就先探测源视频并抽取音轨。
@@ -129,12 +130,15 @@ class TranscribeVideo:
             if can_reuse_transcript:
                 segments = cached_segments
                 reused_transcript = True
+                runtime_message = "已复用原文字幕，未重新加载识别模型。"
             else:
                 language = request.language or project.source_language
                 segments = self.asr_engine.transcribe(
                     audio_path=audio_path,
                     language=None if language == "auto" else language,
                 )
+                if isinstance(self.asr_engine, AsrRuntimeReporter):
+                    runtime_message = self.asr_engine.runtime_summary()
 
                 # 第三步：依次做保守去重和时间轴规整。
                 # 两个步骤职责不同，顺序不能交换：先删重复片段，
@@ -150,7 +154,8 @@ class TranscribeVideo:
 
             # 第四步：所有结构化数据和正式字幕都成功保存后，再推进检查点。
             task.mark_succeeded(
-                "已复用原文字幕" if reused_transcript else "识别完成",
+                runtime_message
+                or ("已复用原文字幕" if reused_transcript else "识别完成"),
                 checkpoint=TaskCheckpoint.TRANSCRIBED,
             )
             self.task_repository.save(task)
@@ -165,6 +170,7 @@ class TranscribeVideo:
                 media=media,
                 reused_audio=reused_audio,
                 reused_transcript=reused_transcript,
+                runtime_message=runtime_message,
             )
         except Exception as exc:
             # 失败状态先写仓储再发布，保证未来 UI 订阅到的状态

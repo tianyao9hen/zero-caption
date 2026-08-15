@@ -56,3 +56,32 @@ def test_build_script_creates_and_verifies_installer() -> None:
     assert "installer\\ZeroCaption.iss" in build_script
     assert "Get-FileHash" in build_script
     assert "verify_installer.ps1" in build_script
+    assert "bundled_models" in build_script
+
+
+def test_release_bundle_includes_small_and_medium_models() -> None:
+    """PyInstaller 与安装验收都应覆盖两套可选识别模型。"""
+
+    spec = (PROJECT_ROOT / "ZeroCaption.spec").read_text(encoding="utf-8-sig")
+    verifier = (
+        PROJECT_ROOT / "scripts" / "verify_installer.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert 'bundled_models = tomllib.load' in spec
+    assert 'resources\\models\\small\\model.bin' in verifier
+    assert 'resources\\models\\medium\\model.bin' in verifier
+
+
+def test_release_bundle_includes_cuda_runtime_libraries() -> None:
+    """发布包应显式收集真实 GPU 推理阶段才会加载的 `cuBLAS 12`。"""
+
+    project = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    spec = (PROJECT_ROOT / "ZeroCaption.spec").read_text(encoding="utf-8-sig")
+    verifier = (
+        PROJECT_ROOT / "scripts" / "verify_installer.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "nvidia-cublas-cu12==12.6.4.1" in project
+    assert 'collect_dynamic_libs("nvidia.cublas")' in spec
+    assert "cublas64_12.dll" in verifier
+    assert "cublasLt64_12.dll" in verifier

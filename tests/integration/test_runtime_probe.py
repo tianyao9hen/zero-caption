@@ -34,7 +34,10 @@ def test_probe_runtime_reports_missing_translation_config_as_warning(tmp_path):
     settings = Settings()
 
     # act：运行探针。
-    with patch("scripts.check_runtime.shutil.which", side_effect=["ffmpeg", "ffprobe"]):
+    with patch(
+        "scripts.check_runtime.shutil.which",
+        side_effect=["ffmpeg", "ffprobe", None],
+    ):
         with patch("scripts.check_runtime.importlib.util.find_spec", return_value=object()):
             report = probe_runtime(settings=settings, workspace_root=tmp_path)
 

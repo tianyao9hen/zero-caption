@@ -1,8 +1,10 @@
 [engine.asr]
 provider = "faster-whisper"
-model_name = "small"
+model_name = "medium"
 device = "cuda"
 compute_type = "float16"
+bundled_models = ["small", "medium"]
+allow_cpu_fallback = true
 
 [task]
 max_concurrency = 1
