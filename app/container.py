@@ -31,6 +31,7 @@ from core.services.task_service import TaskService
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
 from core.usecases.transcribe_video import TranscribeVideo
+from core.usecases.translation_model_test import TranslationModelTest
 from core.usecases.translate_subtitles import TranslateSubtitles
 from infrastructure.asr import CTranslate2HardwareProbe, FasterWhisperEngine
 from infrastructure.media.ffmpeg import FFmpegAdapter
@@ -199,11 +200,10 @@ class AppContainer:
         return self.asr_hardware_info
 
     def create_task_service(self) -> TaskService:
-        """构建已经接通阶段 2 本地识别链路的任务服务。
+        """构建已经接通导入、识别、逐句翻译和导出的任务服务。
 
-        当前仓储仍是进程内实现，所以应用重启后不会保留项目状态。
-        这个限制会在阶段 5 由 SQLite 仓储替换；用例和 UI 调用接口
-        不需要因此改变。
+        仓储、进度总线和外部适配器都由容器统一注入。页面只持有最终服务，
+        不会直接创建数据库连接、识别模型或翻译客户端。
         """
 
         asr_engine = self.create_asr_engine()
@@ -227,24 +227,14 @@ class AppContainer:
             srt_writer=SrtWriter(),
         )
         translation_settings = self.settings.engine.translation
-        translator = OpenAICompatibleTranslator(
-            base_url=translation_settings.base_url,
-            model=translation_settings.model,
-            api_key=translation_settings.api_key,
-            api_key_env=translation_settings.api_key_env,
-            timeout_seconds=translation_settings.timeout_seconds,
-            max_retries=translation_settings.max_retries,
-            batch_builder=TranslationBatchBuilder(
-                max_segments=translation_settings.max_batch_segments,
-                max_characters=translation_settings.max_batch_characters,
-            ),
-        )
+        translator = self._create_translation_adapter(translation_settings)
         translate_subtitles = TranslateSubtitles(
             project_repository=self.project_repository,
             task_repository=self.task_repository,
             subtitle_repository=self.subtitle_repository,
             translator=translator,
             event_publisher=self.progress_bus,
+            translation_event_publisher=self.progress_bus,
             subtitle_writer=SrtWriter(),
         )
         export_video = ExportVideo(
@@ -268,6 +258,42 @@ class AppContainer:
             export_video_usecase=export_video,
             project_repository=self.project_repository,
         )
+
+    def _create_translation_adapter(
+        self,
+        settings: TranslationSettings,
+    ) -> OpenAICompatibleTranslator:
+        """根据一份翻译配置快照创建 OpenAI 兼容适配器。"""
+
+        if settings.provider != "openai-compatible":
+            raise ValueError(f"暂不支持的翻译接口类型：{settings.provider}")
+        return OpenAICompatibleTranslator(
+            base_url=settings.base_url,
+            model=settings.model,
+            api_key=settings.api_key,
+            api_key_env=settings.api_key_env,
+            system_prompt=settings.system_prompt,
+            timeout_seconds=settings.timeout_seconds,
+            max_retries=settings.max_retries,
+            batch_builder=TranslationBatchBuilder(
+                max_segments=1,
+                max_characters=settings.max_batch_characters,
+            ),
+        )
+
+    def test_translation_model(
+        self,
+        settings: TranslationSettings,
+        user_prompt: str,
+    ) -> str:
+        """用当前表单快照执行一次纯文本模型测试。
+
+        该方法会由 Qt 工作线程调用。每次都新建适配器，确保用户尚未保存的
+        接口、模型、密钥和系统提示词也能参与测试，且不会修改正式任务配置。
+        """
+
+        usecase = TranslationModelTest(self._create_translation_adapter(settings))
+        return usecase.execute(user_prompt)
 
     def update_engine_settings(
         self,
@@ -318,6 +344,7 @@ class AppContainer:
             task_service=task_service,
             task_service_factory=self.create_task_service,
             settings_updater=self.update_engine_settings,
+            translation_model_tester=self.test_translation_model,
             asr_hardware_info=self._require_asr_hardware_info(),
             logger=self.logger,
             progress_bus=self.progress_bus,

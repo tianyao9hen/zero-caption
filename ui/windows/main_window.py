@@ -21,9 +21,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from config.settings import EngineSettings, Settings
+from config.settings import EngineSettings, Settings, TranslationSettings
 from core.dto.asr_dto import AsrHardwareInfoDTO
 from core.dto.pipeline_dto import ProcessVideoResult
+from core.dto.subtitle_dto import TranslationProgressDTO
 from core.services.task_service import TaskService
 from infrastructure.storage.workspace import WorkspaceManager
 from infrastructure.task.progress_bus import ProgressBus
@@ -34,6 +35,7 @@ from ui.pages.tasks_page import TasksPage
 from ui.widgets.navigation import NavigationWidget
 from ui.widgets.status_bar import StatusBarWidget
 from ui.viewmodels.pipeline_runner import PipelineRunner
+from ui.viewmodels.translation_test_runner import TranslationTestRunner
 
 
 class MainWindow(QMainWindow):
@@ -46,6 +48,7 @@ class MainWindow(QMainWindow):
         task_service: TaskService,
         task_service_factory: Callable[[], TaskService],
         settings_updater: Callable[[EngineSettings], Settings],
+        translation_model_tester: Callable[[TranslationSettings, str], str],
         asr_hardware_info: AsrHardwareInfoDTO,
         logger: logging.Logger,
         progress_bus: ProgressBus,
@@ -58,9 +61,11 @@ class MainWindow(QMainWindow):
         self.task_service = task_service
         self.task_service_factory = task_service_factory
         self.settings_updater = settings_updater
+        self.translation_model_tester = translation_model_tester
         self.logger = logger
         self.progress_bus = progress_bus
         self._pipeline_runner: PipelineRunner | None = None
+        self._translation_test_runner: TranslationTestRunner | None = None
         self.setWindowTitle(settings.app_name)
         self.resize(1200, 800)
 
@@ -90,6 +95,9 @@ class MainWindow(QMainWindow):
         self.navigation.page_changed.connect(self.stack.setCurrentIndex)
         self.settings_page.save_requested.connect(
             self._handle_engine_settings_save
+        )
+        self.settings_page.test_requested.connect(
+            self._handle_translation_test_requested
         )
 
         root = QWidget()
@@ -140,6 +148,9 @@ class MainWindow(QMainWindow):
         """在 UI 线程消费后台任务事件并刷新任务页和状态栏。"""
 
         for summary in self.progress_bus.drain():
+            if isinstance(summary, TranslationProgressDTO):
+                self.tasks_page.update_translation_progress(summary)
+                continue
             self.tasks_page.update_summary(summary)
             self.status_widget.update_summary(summary)
 
@@ -195,3 +206,58 @@ class MainWindow(QMainWindow):
         message = "引擎设置已保存，后续任务将使用新配置。"
         self.settings_page.show_save_result(True, message)
         self.status_widget.show_message(message)
+
+    def _handle_translation_test_requested(
+        self,
+        value: object,
+        user_prompt: str,
+    ) -> None:
+        """把当前表单快照交给后台线程测试，避免网络请求阻塞界面。"""
+
+        if not isinstance(value, TranslationSettings):
+            self.settings_page.show_test_result(False, "测试配置格式不正确。")
+            return
+        if (
+            self._translation_test_runner is not None
+            and self._translation_test_runner.isRunning()
+        ):
+            self.settings_page.show_test_result(False, "已有模型测试正在进行。")
+            return
+
+        self._translation_test_runner = TranslationTestRunner(
+            tester=self.translation_model_tester,
+            settings=value,
+            user_prompt=user_prompt,
+        )
+        self._translation_test_runner.succeeded.connect(
+            self._handle_translation_test_success
+        )
+        self._translation_test_runner.failed.connect(
+            self._handle_translation_test_failure
+        )
+        self._translation_test_runner.finished.connect(
+            self._release_translation_test_runner
+        )
+        self._translation_test_runner.start()
+
+    def _handle_translation_test_success(self, result: str) -> None:
+        """显示模型测试返回，并恢复测试按钮。"""
+
+        self.settings_page.show_test_result(True, result)
+        self.status_widget.show_message("大模型测试成功。")
+
+    def _handle_translation_test_failure(self, message: str) -> None:
+        """在设置页展示模型测试错误，不弹出阻塞式对话框。"""
+
+        self.settings_page.show_test_result(False, f"测试失败：{message}")
+        self.status_widget.show_message("大模型测试失败。")
+
+    def _release_translation_test_runner(self) -> None:
+        """在线程结束后释放引用，允许用户再次测试。"""
+
+        if (
+            self._translation_test_runner is not None
+            and not self._translation_test_runner.isRunning()
+        ):
+            self._translation_test_runner.deleteLater()
+            self._translation_test_runner = None

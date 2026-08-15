@@ -22,9 +22,10 @@ base_url = ""
 model = ""
 api_key = ""
 api_key_env = "OPENAI_API_KEY"
+system_prompt = "你是一名专业字幕翻译器。请忠实、自然、简洁地翻译字幕，不添加解释。调用方每次只提供一条字幕；请只返回 JSON 数组，数组中包含一个对象，原样保留 id，并在 text 字段中给出译文。不要使用 Markdown 代码块。"
 timeout_seconds = 60.0
 max_retries = 2
-max_batch_segments = 20
+max_batch_segments = 1
 max_batch_characters = 4000
 
 [engine.export]

@@ -153,6 +153,7 @@ def test_save_translation_settings_round_trip_and_masks_repr(tmp_path):
         base_url='https://llm.example/v1?profile="caption"',
         model="caption-pro",
         api_key="very-secret-key",
+        system_prompt="只返回简洁译文。",
         timeout_seconds=45.0,
         max_retries=4,
         max_batch_segments=30,
@@ -169,6 +170,7 @@ def test_save_translation_settings_round_trip_and_masks_repr(tmp_path):
     assert reloaded.base_url == translation.base_url
     assert reloaded.model == "caption-pro"
     assert reloaded.api_key == "very-secret-key"
+    assert reloaded.system_prompt == "只返回简洁译文。"
     assert reloaded.timeout_seconds == 45.0
     assert reloaded.max_retries == 4
     assert reloaded.max_batch_segments == 30

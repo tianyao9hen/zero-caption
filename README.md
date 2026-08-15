@@ -76,8 +76,9 @@ python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
 
 ## Complete MVP Pipeline
 
-可在桌面应用的“设置”页配置翻译接口地址、模型和 API 密钥；也可以使用
-`OPENAI_API_KEY` 环境变量作为密钥回退。配置完成后，可以运行完整无界面主链路：
+可在桌面应用的“设置”页配置翻译接口地址、模型、API 密钥和系统提示词；也可以使用
+`OPENAI_API_KEY` 环境变量作为密钥回退。设置页支持输入用户提示词后台测试当前表单配置。
+正式翻译会逐条独立调用模型，并在任务页实时追加原文和译文。配置完成后，可以运行完整无界面主链路：
 
 ```powershell
 python scripts/process_video.py path/to/video.mp4 --source-language auto --target-language zh-CN

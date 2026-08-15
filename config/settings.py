@@ -48,9 +48,14 @@ class TranslationSettings:
     model: str = ""
     api_key: str = field(default="", repr=False)
     api_key_env: str = "OPENAI_API_KEY"
+    system_prompt: str = (
+        "你是一名专业字幕翻译器。请忠实、自然、简洁地翻译字幕，不添加解释。"
+        "调用方每次只提供一条字幕；请只返回 JSON 数组，数组中包含一个对象，"
+        "原样保留 id，并在 text 字段中给出译文。不要使用 Markdown 代码块。"
+    )
     timeout_seconds: float = 60.0
     max_retries: int = 2
-    max_batch_segments: int = 20
+    max_batch_segments: int = 1
     max_batch_characters: int = 4_000
 
     def is_configured(self) -> bool:
@@ -247,6 +252,7 @@ def save_engine_settings(
             f"model = {_toml_string(translation.model)}",
             f"api_key = {_toml_string(translation.api_key)}",
             f"api_key_env = {_toml_string(translation.api_key_env)}",
+            f"system_prompt = {_toml_string(translation.system_prompt)}",
             f"timeout_seconds = {translation.timeout_seconds}",
             f"max_retries = {translation.max_retries}",
             f"max_batch_segments = {translation.max_batch_segments}",
@@ -316,6 +322,10 @@ def _settings_from_data(data: dict[str, Any]) -> Settings:
                 model=translation.get("model", settings.engine.translation.model),
                 api_key=translation.get("api_key", settings.engine.translation.api_key),
                 api_key_env=translation.get("api_key_env", settings.engine.translation.api_key_env),
+                system_prompt=translation.get(
+                    "system_prompt",
+                    settings.engine.translation.system_prompt,
+                ),
                 timeout_seconds=float(
                     translation.get(
                         "timeout_seconds",
@@ -397,6 +407,8 @@ def _merge_mappings(
 def _validate_translation_settings(settings: TranslationSettings) -> None:
     """检查设置页无法完全表达的数值边界，避免保存无效配置。"""
 
+    if not settings.system_prompt.strip():
+        raise ValueError("翻译系统提示词不能为空。")
     if settings.timeout_seconds <= 0:
         raise ValueError("翻译请求超时时间必须大于 0。")
     if settings.max_retries < 0:

@@ -100,10 +100,14 @@ class FakeTranslator:
         """返回保持时间轴不变的目标语言字幕。"""
 
         self.call_count += 1
-        translated_texts = ["你好", "世界"]
+        translated_texts = {"hello": "你好", "world": "世界"}
         return [
-            replace(segment, text=text, language=target_language)
-            for segment, text in zip(segments, translated_texts, strict=True)
+            replace(
+                segment,
+                text=translated_texts[segment.text],
+                language=target_language,
+            )
+            for segment in segments
         ]
 
 
@@ -186,7 +190,7 @@ def test_task_service_runs_complete_mvp_pipeline_and_reuses_translation(tmp_path
     assert output_video.with_suffix(".srt").is_file()
     assert translated.task.checkpoint is TaskCheckpoint.TRANSLATED
     assert cached_translation.reused_translation is True
-    assert translator.call_count == 1
+    assert translator.call_count == 2
     assert exported.project.status is ProjectStatus.COMPLETED
     assert exported.task.checkpoint is TaskCheckpoint.EXPORTED
 

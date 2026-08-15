@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -34,6 +35,7 @@ class SettingsPage(QWidget):
     # `Signal` 是 Qt 的事件通知机制。这里传递普通 Python 对象，
     # 让页面只负责收集输入，而不需要知道配置最终写到哪个目录。
     save_requested = Signal(object)
+    test_requested = Signal(object, str)
 
     def __init__(
         self,
@@ -57,6 +59,8 @@ class SettingsPage(QWidget):
         content_layout.addWidget(self._build_runtime_group(settings, asr_hardware_info))
         content_layout.addWidget(self._build_asr_group(settings.engine.asr))
         content_layout.addWidget(self._build_translation_group(settings.engine.translation))
+        content_layout.addWidget(self._build_prompt_group(settings.engine.translation))
+        content_layout.addWidget(self._build_model_test_group())
         content_layout.addWidget(self._build_request_group(settings.engine.translation))
 
         action_layout = QHBoxLayout()
@@ -103,6 +107,7 @@ class SettingsPage(QWidget):
             model=self.model_field.text().strip(),
             api_key=self.api_key_field.text().strip(),
             api_key_env=self.api_key_env,
+            system_prompt=self.system_prompt_field.toPlainText().strip(),
             timeout_seconds=self.timeout_spin.value(),
             max_retries=self.retry_spin.value(),
             max_batch_segments=self.batch_segments_spin.value(),
@@ -131,6 +136,7 @@ class SettingsPage(QWidget):
         self.model_field.setText(settings.translation.model)
         self.api_key_field.setText(settings.translation.api_key)
         self.api_key_env = settings.translation.api_key_env
+        self.system_prompt_field.setPlainText(settings.translation.system_prompt)
         self.timeout_spin.setValue(settings.translation.timeout_seconds)
         self.retry_spin.setValue(settings.translation.max_retries)
         self.batch_segments_spin.setValue(settings.translation.max_batch_segments)
@@ -142,6 +148,14 @@ class SettingsPage(QWidget):
         color = "#18794e" if success else "#b42318"
         self.feedback_label.setStyleSheet(f"color: {color};")
         self.feedback_label.setText(message)
+
+    def show_test_result(self, success: bool, message: str) -> None:
+        """结束测试状态，并在页面内展示模型返回或错误信息。"""
+
+        color = "#18794e" if success else "#b42318"
+        self.test_result_field.setStyleSheet(f"color: {color};")
+        self.test_result_field.setPlainText(message)
+        self.test_button.setEnabled(True)
 
     def _build_runtime_group(
         self,
@@ -274,6 +288,60 @@ class SettingsPage(QWidget):
         group.setLayout(form)
         return group
 
+    def _build_prompt_group(self, settings: TranslationSettings) -> QGroupBox:
+        """创建可持久化的翻译系统提示词编辑区。"""
+
+        group = QGroupBox("翻译系统提示词")
+        layout = QVBoxLayout(group)
+        description = QLabel(
+            "该提示词会在下一次逐句翻译和模型测试时作为 system 消息发送。"
+        )
+        description.setWordWrap(True)
+        self.system_prompt_field = QPlainTextEdit(settings.system_prompt)
+        self.system_prompt_field.setObjectName("translationSystemPromptField")
+        self.system_prompt_field.setPlaceholderText("输入翻译规则和返回格式要求")
+        self.system_prompt_field.setMinimumHeight(110)
+        layout.addWidget(description)
+        layout.addWidget(self.system_prompt_field)
+        return group
+
+    def _build_model_test_group(self) -> QGroupBox:
+        """创建用户提示词输入、测试按钮和结果展示区。"""
+
+        group = QGroupBox("大模型测试")
+        layout = QVBoxLayout(group)
+        description = QLabel(
+            "测试使用当前表单中的接口、模型、密钥和系统提示词，不必先保存。"
+        )
+        description.setWordWrap(True)
+        self.test_prompt_field = QPlainTextEdit()
+        self.test_prompt_field.setObjectName("translationTestPromptField")
+        self.test_prompt_field.setPlaceholderText(
+            "例如：请把 Hello, world! 翻译成简体中文。"
+        )
+        self.test_prompt_field.setMaximumHeight(90)
+
+        self.test_button = QPushButton("测试当前配置")
+        self.test_button.setObjectName("testTranslationModelButton")
+        self.test_button.clicked.connect(self._emit_test_requested)
+
+        self.test_result_field = QPlainTextEdit()
+        self.test_result_field.setObjectName("translationTestResultField")
+        self.test_result_field.setReadOnly(True)
+        self.test_result_field.setPlaceholderText("模型返回结果会显示在这里")
+        self.test_result_field.setMinimumHeight(100)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch(1)
+        button_layout.addWidget(self.test_button)
+        layout.addWidget(description)
+        layout.addWidget(QLabel("用户提示词"))
+        layout.addWidget(self.test_prompt_field)
+        layout.addLayout(button_layout)
+        layout.addWidget(QLabel("测试结果"))
+        layout.addWidget(self.test_result_field)
+        return group
+
     def _build_request_group(self, settings: TranslationSettings) -> QGroupBox:
         """创建请求超时、重试和批处理边界设置。"""
 
@@ -294,8 +362,10 @@ class SettingsPage(QWidget):
 
         self.batch_segments_spin = QSpinBox()
         self.batch_segments_spin.setObjectName("translationBatchSegmentsSpin")
-        self.batch_segments_spin.setRange(1, 200)
-        self.batch_segments_spin.setValue(settings.max_batch_segments)
+        self.batch_segments_spin.setRange(1, 1)
+        self.batch_segments_spin.setValue(1)
+        self.batch_segments_spin.setEnabled(False)
+        self.batch_segments_spin.setToolTip("逐句翻译模式固定每次只发送一条字幕。")
 
         self.batch_characters_spin = QSpinBox()
         self.batch_characters_spin.setObjectName("translationBatchCharactersSpin")
@@ -305,7 +375,7 @@ class SettingsPage(QWidget):
 
         form.addRow("请求超时", self.timeout_spin)
         form.addRow("失败重试", self.retry_spin)
-        form.addRow("单批字幕条数", self.batch_segments_spin)
+        form.addRow("每次请求字幕数", self.batch_segments_spin)
         form.addRow("单批字幕字符数", self.batch_characters_spin)
         group.setLayout(form)
         return group
@@ -366,3 +436,16 @@ class SettingsPage(QWidget):
 
         self.feedback_label.clear()
         self.save_requested.emit(self.engine_settings())
+
+    def _emit_test_requested(self) -> None:
+        """把当前表单和测试提示词交给主窗口安排后台请求。"""
+
+        prompt = self.test_prompt_field.toPlainText().strip()
+        if not prompt:
+            self.show_test_result(False, "请输入用于测试模型的用户提示词。")
+            return
+
+        self.test_button.setEnabled(False)
+        self.test_result_field.setStyleSheet("color: #315a8a;")
+        self.test_result_field.setPlainText("正在后台测试，请稍候……")
+        self.test_requested.emit(self.translation_settings(), prompt)

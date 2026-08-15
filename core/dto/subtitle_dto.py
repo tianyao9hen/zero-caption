@@ -75,3 +75,18 @@ class TranslateSubtitlesResult:
     translated_segments: list[SubtitleSegmentDTO]
     subtitle_path: Path | None = None
     reused_translation: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationProgressDTO:
+    """描述一条字幕刚刚完成翻译时的实时展示数据。
+
+    这个 DTO 只携带字幕文本和序号，不包含媒体路径、密钥或网络请求信息。
+    `frozen=True` 表示事件创建后不可修改，避免后台线程发布后内容又发生变化。
+    """
+
+    task_id: str
+    current_index: int
+    total_segments: int
+    source_text: str
+    translated_text: str

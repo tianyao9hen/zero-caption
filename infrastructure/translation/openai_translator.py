@@ -26,7 +26,7 @@ Transport = Callable[[str, dict[str, str], JsonPayload, float], JsonPayload]
 
 
 class OpenAICompatibleTranslator:
-    """调用 Chat Completions 兼容接口完成字幕批量翻译。"""
+    """调用 Chat Completions 兼容接口完成字幕翻译和模型测试。"""
 
     def __init__(
         self,
@@ -34,6 +34,11 @@ class OpenAICompatibleTranslator:
         model: str,
         api_key: str = "",
         api_key_env: str = "OPENAI_API_KEY",
+        system_prompt: str = (
+            "你是一名专业字幕翻译器。请忠实、自然、简洁地翻译字幕，不添加解释。"
+            "调用方每次只提供一条字幕；请只返回 JSON 数组，数组中包含一个对象，"
+            "原样保留 id，并在 text 字段中给出译文。不要使用 Markdown 代码块。"
+        ),
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         batch_builder: TranslationBatchBuilder | None = None,
@@ -55,6 +60,7 @@ class OpenAICompatibleTranslator:
         self.model = model.strip()
         self.api_key = api_key.strip()
         self.api_key_env = api_key_env
+        self.system_prompt = system_prompt.strip()
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.batch_builder = batch_builder or TranslationBatchBuilder()
@@ -68,7 +74,11 @@ class OpenAICompatibleTranslator:
         target_language: str,
         context: str | None = None,
     ) -> list[SubtitleSegmentDTO]:
-        """批量翻译字幕文本并按原顺序返回目标语言片段。"""
+        """翻译传入字幕并按原顺序返回目标语言片段。
+
+        正式业务用例每次只传一条字幕，以确保逐句独立请求；这里仍保留列表
+        协议用于兼容端口和底层响应校验，不负责决定业务调用粒度。
+        """
 
         if not segments or source_language == target_language:
             return [
@@ -98,7 +108,11 @@ class OpenAICompatibleTranslator:
             for segment_id, text in self._parse_translations(response, batch):
                 translated_by_id[segment_id] = text
 
-        missing_ids = [segment.segment_id for segment in segments if segment.segment_id not in translated_by_id]
+        missing_ids = [
+            segment.segment_id
+            for segment in segments
+            if segment.segment_id not in translated_by_id
+        ]
         if missing_ids:
             raise TranslationResponseError(
                 f"翻译响应缺少字幕编号：{', '.join(missing_ids[:5])}"
@@ -115,6 +129,32 @@ class OpenAICompatibleTranslator:
             for segment in segments
         ]
 
+    def test_prompt(self, user_prompt: str) -> str:
+        """使用当前系统提示词和用户提示词执行一次模型测试。
+
+        该方法返回模型的原始文本正文，便于用户观察自己的提示词实际效果。
+        请求只包含两段提示词和模型参数，不包含任何项目媒体或字幕文件。
+        """
+
+        prompt = user_prompt.strip()
+        if not prompt:
+            raise ValueError("请输入用于测试模型的用户提示词。")
+        self._validate_configuration()
+        response = self._request_payload_with_retry(
+            {
+                "model": self.model,
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+        )
+        content = self._extract_content(response).strip()
+        if not content:
+            raise TranslationResponseError("模型测试返回了空内容。")
+        return content
+
     def _validate_configuration(self) -> None:
         """在首次网络请求前检查地址、模型和密钥配置。"""
 
@@ -122,13 +162,19 @@ class OpenAICompatibleTranslator:
             raise TranslationConfigurationError("翻译接口地址尚未配置。")
         if not self.model:
             raise TranslationConfigurationError("翻译模型尚未配置。")
+        if not self.system_prompt:
+            raise TranslationConfigurationError("翻译系统提示词尚未配置。")
         if not self._resolved_api_key():
             raise TranslationConfigurationError("翻译 API 密钥尚未配置。")
 
     def _request_with_retry(self, batch: TranslationBatch) -> JsonPayload:
         """发送一个批次，并对网络或服务端临时错误做指数退避重试。"""
 
-        payload = self._build_payload(batch)
+        return self._request_payload_with_retry(self._build_payload(batch))
+
+    def _request_payload_with_retry(self, payload: JsonPayload) -> JsonPayload:
+        """发送一个请求正文，并统一应用认证、超时和重试策略。"""
+
         endpoint = self._endpoint()
         headers = {
             "Content-Type": "application/json",
@@ -173,10 +219,6 @@ class OpenAICompatibleTranslator:
             {"id": segment.segment_id, "text": segment.text}
             for segment in batch.segments
         ]
-        instructions = (
-            "你是字幕翻译器。只翻译字幕正文，不解释、不合并、不删除条目。"
-            "必须返回 JSON 数组，每项包含原样保留的 id 和翻译后的 text。"
-        )
         user_payload = {
             "source_language": batch.source_language,
             "target_language": batch.target_language,
@@ -187,7 +229,7 @@ class OpenAICompatibleTranslator:
             "model": self.model,
             "temperature": 0,
             "messages": [
-                {"role": "system", "content": instructions},
+                {"role": "system", "content": self.system_prompt},
                 {
                     "role": "user",
                     "content": json.dumps(user_payload, ensure_ascii=False),
@@ -203,10 +245,9 @@ class OpenAICompatibleTranslator:
         """解析模型返回的 JSON 数组，并校验编号与文本完整性。"""
 
         try:
-            choices = response["choices"]
-            content = choices[0]["message"]["content"]  # type: ignore[index]
+            content = self._extract_content(response)
             parsed = json.loads(self._strip_code_fence(str(content)))
-        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise TranslationResponseError("翻译服务返回内容无法解析。") from exc
 
         if isinstance(parsed, dict):
@@ -231,6 +272,18 @@ class OpenAICompatibleTranslator:
             (segment.segment_id, str(text).strip())
             for segment, text in zip(batch.segments, parsed, strict=True)
         ]
+
+    def _extract_content(self, response: JsonPayload) -> str:
+        """从兼容 Chat Completions 的响应中读取第一条文本正文。"""
+
+        try:
+            choices = response["choices"]
+            content = choices[0]["message"]["content"]  # type: ignore[index]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise TranslationResponseError("翻译服务响应缺少文本内容。") from exc
+        if not isinstance(content, str):
+            raise TranslationResponseError("翻译服务响应的文本内容格式不正确。")
+        return content
 
     def _strip_code_fence(self, content: str) -> str:
         """去掉模型偶尔包裹 JSON 的 Markdown 代码围栏。"""

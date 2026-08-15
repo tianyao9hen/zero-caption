@@ -9,9 +9,16 @@ from __future__ import annotations
 from typing import Protocol
 
 from core.domain.entities import Task
+from core.dto.subtitle_dto import TranslationProgressDTO
 
 
 class TaskEventPublisher(Protocol):
     """发布任务状态快照的最小能力。"""
 
     def publish(self, task: Task) -> None: ...
+
+
+class TranslationProgressPublisher(Protocol):
+    """发布逐句翻译结果，供界面层实时追加展示。"""
+
+    def publish_translation(self, progress: TranslationProgressDTO) -> None: ...

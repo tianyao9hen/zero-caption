@@ -2,6 +2,7 @@
 
 from core.domain.entities import Task
 from core.domain.enums import TaskCheckpoint
+from core.dto.subtitle_dto import TranslationProgressDTO
 from infrastructure.task.progress_bus import ProgressBus
 
 
@@ -24,3 +25,20 @@ def test_progress_bus_drain_returns_events_without_blocking() -> None:
     assert [event.task_id for event in events] == ["task-1", "task-2"]
     assert events[1].progress == 20
     assert bus.drain() == []
+
+
+def test_progress_bus_keeps_translation_event_in_publish_order() -> None:
+    """逐句译文事件应和普通任务事件共享同一条有序线程安全队列。"""
+
+    bus = ProgressBus()
+    progress = TranslationProgressDTO(
+        task_id="task-translate",
+        current_index=1,
+        total_segments=2,
+        source_text="hello",
+        translated_text="你好",
+    )
+
+    bus.publish_translation(progress)
+
+    assert bus.drain() == [progress]

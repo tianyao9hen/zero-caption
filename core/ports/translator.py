@@ -21,3 +21,12 @@ class Translator(Protocol):
         target_language: str,
         context: str | None = None,
     ) -> list[SubtitleSegmentDTO]: ...
+
+
+class TranslationModelTester(Protocol):
+    """描述使用自定义用户提示词测试大模型连接的能力。
+
+    测试端口只接收文本，不接触项目、视频或音频，继续守住本地媒体边界。
+    """
+
+    def test_prompt(self, user_prompt: str) -> str: ...

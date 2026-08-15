@@ -47,6 +47,7 @@ def test_translator_sends_only_text_and_language_context(monkeypatch) -> None:
         base_url="https://translation.example/v1",
         model="test-model",
         api_key_env="TEST_TRANSLATION_KEY",
+        system_prompt="自定义字幕系统提示词",
         batch_builder=TranslationBatchBuilder(max_segments=10, max_characters=100),
         transport=transport,
     )
@@ -57,6 +58,7 @@ def test_translator_sends_only_text_and_language_context(monkeypatch) -> None:
     # assert：检查端点、语言和字幕正文；媒体路径从未进入请求结构。
     assert requests[0][0] == "https://translation.example/v1/chat/completions"
     assert requests[0][1]["Authorization"] == "Bearer secret-value"
+    assert requests[0][2]["messages"][0]["content"] == "自定义字幕系统提示词"  # type: ignore[index]
     user_content = requests[0][2]["messages"][1]["content"]  # type: ignore[index]
     request_data = json.loads(user_content)
     assert request_data["source_language"] == "ja-JP"
@@ -149,3 +151,30 @@ def test_translator_requires_api_key_only_when_translation_is_needed(monkeypatch
     with pytest.raises(TranslationConfigurationError):
         translator.translate_segments([_segments()[0]], "ja-JP", "zh-CN")
     assert translator.translate_segments([_segments()[0]], "ja-JP", "ja-JP")[0].text == "こんにちは"
+
+
+def test_model_test_uses_current_system_and_user_prompts(monkeypatch) -> None:
+    """模型测试应发送当前两类提示词，并原样返回模型文本。"""
+
+    monkeypatch.setenv("TEST_TRANSLATION_KEY", "secret-value")
+    requests: list[dict[str, object]] = []
+
+    def transport(endpoint, headers, payload, timeout):
+        requests.append(payload)
+        return {"choices": [{"message": {"content": "测试成功"}}]}
+
+    translator = OpenAICompatibleTranslator(
+        base_url="https://translation.example/v1",
+        model="test-model",
+        api_key_env="TEST_TRANSLATION_KEY",
+        system_prompt="只输出测试结果",
+        transport=transport,
+    )
+
+    result = translator.test_prompt("请回答连接是否正常")
+
+    assert result == "测试成功"
+    assert requests[0]["messages"] == [
+        {"role": "system", "content": "只输出测试结果"},
+        {"role": "user", "content": "请回答连接是否正常"},
+    ]

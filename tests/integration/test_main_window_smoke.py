@@ -79,6 +79,7 @@ def test_main_window_refreshes_task_service_after_translation_settings_save(
     window.settings_page.base_url_field.setText("https://llm.example/v1")
     window.settings_page.model_field.setText("caption-model")
     window.settings_page.api_key_field.setText("configured-secret")
+    window.settings_page.system_prompt_field.setPlainText("保存后的新系统提示词")
     window.settings_page.save_button.click()
     app.processEvents()
 
@@ -87,8 +88,13 @@ def test_main_window_refreshes_task_service_after_translation_settings_save(
     assert isinstance(saved_settings[0], EngineSettings)
     assert saved_settings[0].translation.api_key == "configured-secret"
     assert container.settings.engine.translation.model == "caption-model"
+    assert container.settings.engine.translation.system_prompt == "保存后的新系统提示词"
     assert window.settings.engine.translation.base_url == "https://llm.example/v1"
     assert window.task_service is not original_service
+    assert (
+        window.task_service.translate_subtitles_usecase.translator.system_prompt
+        == "保存后的新系统提示词"
+    )
     assert "后续任务将使用新配置" in window.settings_page.feedback_label.text()
 
     window.close()

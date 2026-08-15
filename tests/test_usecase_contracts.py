@@ -8,6 +8,8 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from core.domain.entities import Project, Task
 from core.domain.enums import ExportMode, ProjectStatus, TaskCheckpoint, TaskStatus
 from core.dto.project_dto import CreateProjectInput
@@ -15,6 +17,7 @@ from core.dto.subtitle_dto import (
     SubtitleSegmentDTO,
     TranscribeVideoInput,
     TranslateSubtitlesInput,
+    TranslationProgressDTO,
 )
 from core.dto.task_dto import ExportRecordDTO, ExportVideoInput
 from core.services.task_service import TaskService
@@ -109,9 +112,15 @@ class RecordingTaskEventPublisher:
 
     def __init__(self) -> None:
         self.published: list[Task] = []
+        self.translation_events: list[TranslationProgressDTO] = []
 
     def publish(self, task: Task) -> None:
         self.published.append(task)
+
+    def publish_translation(self, progress: TranslationProgressDTO) -> None:
+        """记录逐句译文事件，验证核心层会及时通知界面。"""
+
+        self.translation_events.append(progress)
 
 
 class RecordingAsrEngine:
@@ -144,6 +153,28 @@ class RecordingTranslator:
             replace(segment, text=f"{segment.text}-translated", language=target_language)
             for segment in segments
         ]
+
+
+class FailingSecondTranslator(RecordingTranslator):
+    """第二次调用时失败，用于验证逐句检查点不会丢失。"""
+
+    def translate_segments(
+        self,
+        segments: list[SubtitleSegmentDTO],
+        source_language: str,
+        target_language: str,
+        context: str | None = None,
+    ) -> list[SubtitleSegmentDTO]:
+        """第一条正常返回，第二条模拟远程服务失败。"""
+
+        if self.calls:
+            raise RuntimeError("模拟第二条翻译失败")
+        return super().translate_segments(
+            segments,
+            source_language,
+            target_language,
+            context,
+        )
 
 
 class RecordingVideoExporter:
@@ -290,6 +321,7 @@ def test_translate_subtitles_only_sends_text_segments_and_language_info(tmp_path
         subtitle_repository=subtitles,
         translator=translator,
         event_publisher=publisher,
+        translation_event_publisher=publisher,
     )
 
     # act：执行翻译用例。
@@ -302,14 +334,28 @@ def test_translate_subtitles_only_sends_text_segments_and_language_info(tmp_path
         )
     )
 
-    # assert：翻译器收到的是字幕片段集合和语言信息，而不是媒体文件路径。
-    translated_call = translator.calls[-1]
-    assert [segment.text for segment in translated_call[0]] == ["hello", "world"]
-    assert translated_call[1:] == ("ja-JP", "zh-CN", "动画对白")
+    # assert：两条字幕必须产生两次独立调用，每次只发送一条字幕和语言信息。
+    assert len(translator.calls) == 2
+    assert [[segment.text for segment in call[0]] for call in translator.calls] == [
+        ["hello"],
+        ["world"],
+    ]
+    assert all(
+        call[1:] == ("ja-JP", "zh-CN", "动画对白")
+        for call in translator.calls
+    )
     assert result.task.status is TaskStatus.SUCCEEDED
     assert result.task.checkpoint is TaskCheckpoint.TRANSLATED
     assert all(segment.language == "zh-CN" for segment in result.translated_segments)
     assert subtitles.get_translated_segments(project.project_id, "zh-CN") == result.translated_segments
+    assert [event.source_text for event in publisher.translation_events] == [
+        "hello",
+        "world",
+    ]
+    assert [event.translated_text for event in publisher.translation_events] == [
+        "hello-translated",
+        "world-translated",
+    ]
 
 
 def test_export_video_builds_export_request_and_returns_record(tmp_path):
@@ -354,6 +400,46 @@ def test_export_video_builds_export_request_and_returns_record(tmp_path):
     assert result.task.checkpoint is TaskCheckpoint.EXPORTED
     assert result.project.status is ProjectStatus.COMPLETED
     assert exports.get_latest_by_project(project.project_id) == result.export_record
+
+
+def test_translate_subtitles_keeps_completed_sentence_after_later_failure(tmp_path):
+    """后续字幕失败时，已完成译文应保留，并在重试时避免重复调用。"""
+
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    project = _seed_project(tmp_path)
+    segments = _build_segments()
+    projects.save(project)
+    subtitles.save_source_segments(project.project_id, segments)
+    usecase = TranslateSubtitles(
+        project_repository=projects,
+        task_repository=tasks,
+        subtitle_repository=subtitles,
+        translator=FailingSecondTranslator(),
+    )
+    request = TranslateSubtitlesInput(
+        project_id=project.project_id,
+        source_language="ja-JP",
+        target_language="zh-CN",
+    )
+
+    with pytest.raises(RuntimeError, match="第二条翻译失败"):
+        usecase.execute(request)
+
+    saved = subtitles.get_translated_segments(project.project_id, "zh-CN")
+    assert [segment.segment_id for segment in saved] == ["seg-1"]
+
+    retry_translator = RecordingTranslator()
+    usecase.translator = retry_translator
+    result = usecase.execute(request)
+
+    assert len(retry_translator.calls) == 1
+    assert retry_translator.calls[0][0][0].segment_id == "seg-2"
+    assert [segment.segment_id for segment in result.translated_segments] == [
+        "seg-1",
+        "seg-2",
+    ]
 
 
 def test_task_service_uses_latest_task_snapshot_for_summary(tmp_path):

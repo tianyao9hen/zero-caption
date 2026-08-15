@@ -53,6 +53,7 @@ def test_settings_page_masks_key_and_emits_edited_translation_settings(
     page.base_url_field.setText("https://new.example/v1")
     page.model_field.setText("new-model")
     page.api_key_field.setText("new-secret")
+    page.system_prompt_field.setPlainText("新的系统提示词")
     page.asr_model_combo.setCurrentIndex(page.asr_model_combo.findData("medium"))
     page.asr_device_combo.setCurrentIndex(page.asr_device_combo.findData("cuda"))
     page.asr_compute_combo.setCurrentIndex(
@@ -60,7 +61,6 @@ def test_settings_page_masks_key_and_emits_edited_translation_settings(
     )
     page.timeout_spin.setValue(90.0)
     page.retry_spin.setValue(5)
-    page.batch_segments_spin.setValue(40)
     page.batch_characters_spin.setValue(8_000)
     page.save_button.click()
     app.processEvents()
@@ -76,7 +76,8 @@ def test_settings_page_masks_key_and_emits_edited_translation_settings(
     assert emitted[0].translation.api_key == "new-secret"
     assert emitted[0].translation.timeout_seconds == 90.0
     assert emitted[0].translation.max_retries == 5
-    assert emitted[0].translation.max_batch_segments == 40
+    assert emitted[0].translation.system_prompt == "新的系统提示词"
+    assert emitted[0].translation.max_batch_segments == 1
     assert emitted[0].translation.max_batch_characters == 8_000
 
     page.deleteLater()
@@ -100,5 +101,33 @@ def test_settings_page_applies_detected_gpu_recommendation(monkeypatch) -> None:
     assert page.asr_compute_combo.currentData() == "float16"
     assert page.cpu_fallback_check.isChecked() is True
     assert emitted == []
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_settings_page_emits_current_form_for_model_test(monkeypatch) -> None:
+    """测试按钮应提交未保存的系统提示词和用户提示词，并展示结果。"""
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    page = SettingsPage(Settings(), gpu_hardware_info())
+    emitted: list[tuple[TranslationSettings, str]] = []
+    page.test_requested.connect(
+        lambda settings, prompt: emitted.append((settings, prompt))
+    )
+
+    page.system_prompt_field.setPlainText("当前未保存的系统提示词")
+    page.test_prompt_field.setPlainText("当前用户提示词")
+    page.test_button.click()
+    app.processEvents()
+
+    assert len(emitted) == 1
+    assert emitted[0][0].system_prompt == "当前未保存的系统提示词"
+    assert emitted[0][1] == "当前用户提示词"
+    assert page.test_button.isEnabled() is False
+
+    page.show_test_result(True, "模型返回文本")
+    assert page.test_button.isEnabled() is True
+    assert page.test_result_field.toPlainText() == "模型返回文本"
     page.deleteLater()
     app.processEvents()
