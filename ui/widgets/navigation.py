@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton
+from PySide6.QtWidgets import QButtonGroup, QHBoxLayout, QPushButton, QWidget
 
 
 class NavigationWidget(QWidget):
@@ -23,6 +23,18 @@ class NavigationWidget(QWidget):
         self.projects_button = QPushButton("项目")
         self.tasks_button = QPushButton("任务")
         self.settings_button = QPushButton("设置")
+        self._buttons = [
+            self.projects_button,
+            self.tasks_button,
+            self.settings_button,
+        ]
+        self._button_group = QButtonGroup(self)
+        self._button_group.setExclusive(True)
+        for index, button in enumerate(self._buttons):
+            # 可选中按钮让用户始终知道自己位于哪个工作区。
+            # `QButtonGroup` 只管理互斥状态，不负责页面切换。
+            button.setCheckable(True)
+            self._button_group.addButton(button, index)
         layout.addWidget(self.projects_button)
         layout.addWidget(self.tasks_button)
         layout.addWidget(self.settings_button)
@@ -33,3 +45,12 @@ class NavigationWidget(QWidget):
         self.projects_button.clicked.connect(lambda: self.page_changed.emit(0))
         self.tasks_button.clicked.connect(lambda: self.page_changed.emit(1))
         self.settings_button.clicked.connect(lambda: self.page_changed.emit(2))
+        self.projects_button.setChecked(True)
+
+    def set_current_page(self, index: int) -> None:
+        """选中指定导航按钮并发出页面切换信号。"""
+
+        if not 0 <= index < len(self._buttons):
+            raise ValueError(f"页面索引超出范围：{index}")
+        self._buttons[index].setChecked(True)
+        self.page_changed.emit(index)

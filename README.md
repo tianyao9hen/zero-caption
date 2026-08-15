@@ -14,7 +14,8 @@ Windows 本地优先的视频字幕生成与翻译桌面应用。
 - 字幕去重、时间轴规整和 SRT 写出
 - 无界面的单视频识别主链路与缓存复用
 - 云端字幕翻译、外挂字幕和 FFmpeg 烧录导出
-- PySide6 后台任务、进度总线和导入参数表单
+- PySide6 后台任务、进度总线和集中式任务创建表单
+- 按视频聚合的持久化任务工作区、阶段详情和逐句译文
 - SQLite 项目/任务/字幕/导出记录与可恢复任务队列
 - ASS 字幕、项目日志、诊断包和 Windows 打包烟测脚本
 
@@ -71,8 +72,8 @@ CUDA 硬件建议以及关键翻译配置是否已经准备好。
 python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
 ```
 
-原文字幕会写入 `data/projects/<project_id>/subtitles/source.srt`。桌面导入对话框提供
-“仅生成原文字幕（本地）”处理方式，未配置大模型时会默认选中该方式，并跳过翻译和视频导出。
+原文字幕会写入 `data/projects/<project_id>/subtitles/source.srt`。桌面“创建视频任务”表单提供
+“自动识别语言并生成原文字幕（本地）”处理方式，未配置大模型时会默认选中该方式，并跳过翻译和视频导出。
 
 ## Complete MVP Pipeline
 

@@ -31,6 +31,15 @@ class InMemoryProjectRepository:
 
         return self._items.get(project_id)
 
+    def list_all(self) -> list[Project]:
+        """按最近更新时间返回全部项目，行为与 SQLite 仓储保持一致。"""
+
+        return sorted(
+            self._items.values(),
+            key=lambda project: project.updated_at,
+            reverse=True,
+        )
+
 
 @dataclass(slots=True)
 class InMemoryTaskRepository:
@@ -48,6 +57,19 @@ class InMemoryTaskRepository:
         """按任务编号读取实体，不存在时返回 `None`。"""
 
         return self._items.get(task_id)
+
+    def list_by_project(self, project_id: str) -> list[Task]:
+        """返回一个项目的内部任务，最新创建的任务排在前面。"""
+
+        return sorted(
+            (
+                task
+                for task in self._items.values()
+                if task.project_id == project_id
+            ),
+            key=lambda task: task.created_at,
+            reverse=True,
+        )
 
 
 @dataclass(slots=True)

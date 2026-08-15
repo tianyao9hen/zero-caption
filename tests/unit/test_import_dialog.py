@@ -60,3 +60,17 @@ def test_import_dialog_defaults_to_full_pipeline_when_translation_is_configured(
     assert dialog.export_mode_combo.isEnabled() is True
     dialog.deleteLater()
     app.processEvents()
+
+
+def test_import_dialog_explains_task_creation_and_asr_runtime() -> None:
+    """创建任务表单应明确展示识别运行参数和提交动作。"""
+
+    app = QApplication.instance() or QApplication([])
+    dialog = ImportDialog(asr_runtime_summary="medium / GPU / float16")
+
+    assert dialog.windowTitle() == "创建视频处理任务"
+    assert dialog.asr_runtime_label.text() == "medium / GPU / float16"
+    assert "后台" in dialog.processing_hint_label.text()
+
+    dialog.deleteLater()
+    app.processEvents()

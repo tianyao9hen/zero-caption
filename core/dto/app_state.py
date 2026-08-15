@@ -14,5 +14,5 @@ class AppStateDTO:
     """应用级 UI 状态的最小快照。"""
 
     current_page: str = "projects"
-    task_summary: str = "No active task"
-    log_summary: str = "No recent events"
+    task_summary: str = "暂无活动任务"
+    log_summary: str = "暂无最近事件"

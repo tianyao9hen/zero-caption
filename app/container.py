@@ -257,6 +257,7 @@ class AppContainer:
             translate_subtitles_usecase=translate_subtitles,
             export_video_usecase=export_video,
             project_repository=self.project_repository,
+            task_repository=self.task_repository,
         )
 
     def _create_translation_adapter(

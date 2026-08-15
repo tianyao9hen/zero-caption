@@ -23,6 +23,7 @@ def test_progress_bus_drain_returns_events_without_blocking() -> None:
 
     # assert：事件内容和顺序保持不变，第二次消费不会等待生产者。
     assert [event.task_id for event in events] == ["task-1", "task-2"]
+    assert [event.project_id for event in events] == ["project-1", "project-1"]
     assert events[1].progress == 20
     assert bus.drain() == []
 

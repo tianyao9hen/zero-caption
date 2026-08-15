@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from core.domain.entities import Project, Task
@@ -23,6 +24,35 @@ class TaskSummaryDTO:
     progress: int
     current_step: str
     message: str
+    project_id: str = ""
+
+
+@dataclass(slots=True)
+class VideoTaskHistoryDTO:
+    """表示任务页中一条持久化的视频处理记录。
+
+    一个视频项目会依次产生导入、识别、翻译和导出等多个内部任务。
+    界面不直接展示这些实现细节，而是把同一项目聚合成一个视频任务条目，
+    并附带最近内部任务的状态，便于用户按视频理解处理进度。
+    """
+
+    project_id: str
+    source_video: Path
+    workspace_dir: Path
+    source_language: str
+    target_language: str
+    project_status: str
+    task_id: str
+    task_type: str
+    task_status: str
+    progress: int
+    checkpoint: str
+    current_step: str
+    message: str
+    error_message: str
+    retry_count: int
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(slots=True)

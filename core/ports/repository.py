@@ -16,6 +16,8 @@ class ProjectRepository(Protocol):
 
     def get_by_id(self, project_id: str) -> Project | None: ...
 
+    def list_all(self) -> list[Project]: ...
+
 
 class TaskRepository(Protocol):
     """任务记录持久化所需的最小能力。"""
@@ -23,6 +25,8 @@ class TaskRepository(Protocol):
     def save(self, task: Task) -> Task: ...
 
     def get_by_id(self, task_id: str) -> Task | None: ...
+
+    def list_by_project(self, project_id: str) -> list[Task]: ...
 
 
 class SubtitleRepository(Protocol):

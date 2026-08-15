@@ -17,8 +17,13 @@ from core.dto.subtitle_dto import (
     TranslateSubtitlesInput,
     TranslateSubtitlesResult,
 )
-from core.dto.task_dto import ExportVideoInput, ExportVideoResult, TaskSummaryDTO
-from core.ports.repository import ProjectRepository
+from core.dto.task_dto import (
+    ExportVideoInput,
+    ExportVideoResult,
+    TaskSummaryDTO,
+    VideoTaskHistoryDTO,
+)
+from core.ports.repository import ProjectRepository, TaskRepository
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
 from core.usecases.transcribe_video import TranscribeVideo
@@ -34,6 +39,7 @@ class TaskService:
     translate_subtitles_usecase: TranslateSubtitles | None = None
     export_video_usecase: ExportVideo | None = None
     project_repository: ProjectRepository | None = None
+    task_repository: TaskRepository | None = None
     _latest_task_summary: TaskSummaryDTO | None = field(default=None, init=False)
 
     def summary(self) -> str:
@@ -44,7 +50,7 @@ class TaskService:
         """
 
         if self._latest_task_summary is None:
-            return "No active task"
+            return "暂无活动任务"
         summary = self._latest_task_summary
         return f"{summary.task_type}: {summary.message} ({summary.progress}%)"
 
@@ -159,6 +165,72 @@ class TaskService:
             export=export,
         )
 
+    def list_video_tasks(self, limit: int = 50) -> list[VideoTaskHistoryDTO]:
+        """按视频项目聚合并返回最近任务记录。
+
+        参数：
+            limit：最多返回多少个视频项目，必须大于零。
+
+        返回：
+            每个项目只出现一次，并附带该项目最近内部任务的状态。
+
+        这个查询只整理仓储数据，不执行识别、翻译或文件写入。
+        因此任务页可以在应用重启后恢复历史视图，又不会直接依赖 SQLite。
+        """
+
+        if limit <= 0:
+            raise ValueError("任务历史数量必须大于 0。")
+
+        project_repository = self._require_dependency(
+            self.project_repository,
+            "项目仓储",
+        )
+        task_repository = self._require_dependency(
+            self.task_repository,
+            "任务仓储",
+        )
+
+        # 第一步：项目仓储已经按更新时间倒序返回记录，先截断可以避免
+        # 历史数量很大时为不可见项目继续读取任务明细。
+        projects = project_repository.list_all()[:limit]
+        history: list[VideoTaskHistoryDTO] = []
+
+        # 第二步：同一个视频会产生多个内部任务，界面只取最新一条作为摘要。
+        # 这样用户看到的是“一个视频任务”，而不是四个彼此割裂的技术步骤。
+        for project in projects:
+            tasks = task_repository.list_by_project(project.project_id)
+            latest_task = tasks[0] if tasks else None
+            history.append(
+                VideoTaskHistoryDTO(
+                    project_id=project.project_id,
+                    source_video=project.source_video,
+                    workspace_dir=project.workspace_dir,
+                    source_language=project.source_language,
+                    target_language=project.target_language,
+                    project_status=project.status.value,
+                    task_id=latest_task.task_id if latest_task else "",
+                    task_type=latest_task.task_type if latest_task else "",
+                    task_status=(
+                        latest_task.status.value if latest_task else "pending"
+                    ),
+                    progress=latest_task.progress if latest_task else 0,
+                    checkpoint=(
+                        latest_task.checkpoint.value
+                        if latest_task and latest_task.checkpoint
+                        else ""
+                    ),
+                    current_step=latest_task.current_step if latest_task else "",
+                    message=latest_task.message if latest_task else "",
+                    error_message=(
+                        latest_task.error_message if latest_task else ""
+                    ),
+                    retry_count=latest_task.retry_count if latest_task else 0,
+                    created_at=project.created_at,
+                    updated_at=project.updated_at,
+                )
+            )
+        return history
+
     def _remember_task(self, task) -> None:
         """把最近一次任务快照转成摘要，供界面层读取。"""
 
@@ -169,6 +241,7 @@ class TaskService:
             progress=task.progress,
             current_step=task.current_step,
             message=task.message,
+            project_id=task.project_id,
         )
 
     def _require_usecase(self, usecase):

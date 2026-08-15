@@ -14,6 +14,13 @@ from core.services.task_service import TaskService
 class StatusBarWidget(QWidget):
     """显示当前任务状态的简短摘要。"""
 
+    _TASK_TYPE_LABELS = {
+        "create_project": "导入视频",
+        "transcribe_video": "生成字幕",
+        "translate_subtitles": "逐句翻译",
+        "export_video": "导出视频",
+    }
+
     def __init__(self, task_service: TaskService) -> None:
         super().__init__()
         layout = QHBoxLayout(self)
@@ -24,8 +31,12 @@ class StatusBarWidget(QWidget):
     def update_summary(self, summary: TaskSummaryDTO) -> None:
         """用最新任务摘要刷新状态栏文字。"""
 
+        task_type = self._TASK_TYPE_LABELS.get(
+            summary.task_type,
+            summary.task_type,
+        )
         self.label.setText(
-            f"{summary.task_type}: {summary.message} ({summary.progress}%)"
+            f"{task_type}：{summary.message}（{summary.progress}%）"
         )
 
     def show_message(self, message: str) -> None:

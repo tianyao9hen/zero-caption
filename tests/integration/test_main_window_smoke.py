@@ -40,6 +40,15 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
     assert window.size().width() == 1200
     assert window.projects_page is not None
     assert window.tasks_page is not None
+    assert window.navigation.projects_button.isChecked() is True
+
+    # act：程序化切换任务工作区时，页面栈和导航选中状态应同步。
+    window.navigation.set_current_page(1)
+    app.processEvents()
+
+    assert window.stack.currentWidget() is window.tasks_page
+    assert window.navigation.tasks_button.isChecked() is True
+    assert window.tasks_page.create_task_button.text() == "创建视频任务"
     window.close()
     window.deleteLater()
     app.processEvents()

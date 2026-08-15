@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         self.task_service_factory = task_service_factory
         self.settings_updater = settings_updater
         self.translation_model_tester = translation_model_tester
+        self.asr_hardware_info = asr_hardware_info
         self.logger = logger
         self.progress_bus = progress_bus
         self._pipeline_runner: PipelineRunner | None = None
@@ -99,6 +100,8 @@ class MainWindow(QMainWindow):
         self.settings_page.test_requested.connect(
             self._handle_translation_test_requested
         )
+        self.tasks_page.create_requested.connect(self.open_import_dialog)
+        self.tasks_page.refresh_history()
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -106,7 +109,8 @@ class MainWindow(QMainWindow):
         # 顶部区域放全局操作，这些按钮不应该随着页面切换而消失。
         header = QHBoxLayout()
         title = QLabel("Zero Caption")
-        import_button = QPushButton("导入视频")
+        import_button = QPushButton("创建视频任务")
+        import_button.setObjectName("createVideoTaskHeaderButton")
         import_button.clicked.connect(self.open_import_dialog)
         header.addWidget(title)
         header.addStretch(1)
@@ -132,11 +136,15 @@ class MainWindow(QMainWindow):
             translation_configured=(
                 self.settings.engine.translation.is_configured()
             ),
+            asr_runtime_summary=self._asr_runtime_summary(),
         )
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
 
         request = dialog.to_request(self.workspace.root)
+        # 创建完成后停留在任务工作区，让用户立即看到视频条目、当前阶段
+        # 和逐句译文，而不是在任务运行期间反复切换页面寻找反馈。
+        self.navigation.set_current_page(1)
         self.tasks_page.show_running()
         self._pipeline_runner = PipelineRunner(self.task_service, request)
         self._pipeline_runner.succeeded.connect(self._handle_pipeline_success)
@@ -158,7 +166,10 @@ class MainWindow(QMainWindow):
         """处理后台线程成功信号，刷新项目页并展示本次主要产物。"""
 
         self.projects_page.show_result(result)
-        self.navigation.page_changed.emit(0)
+        self.tasks_page.refresh_history(
+            select_project_id=result.final_project.project_id
+        )
+        self.navigation.set_current_page(1)
         if result.export is not None:
             output_path = result.export.export_record.output_path
             self.status_widget.show_message(f"处理完成：{output_path}")
@@ -170,6 +181,7 @@ class MainWindow(QMainWindow):
     def _handle_pipeline_failure(self, message: str) -> None:
         """处理后台线程失败信号，并把错误展示给用户。"""
 
+        self.tasks_page.refresh_history()
         self.status_widget.show_message(f"处理失败：{message}")
         QMessageBox.critical(self, "处理失败", message)
 
@@ -202,6 +214,7 @@ class MainWindow(QMainWindow):
 
         self.settings = updated_settings
         self.task_service = task_service
+        self.tasks_page.set_task_service(task_service)
         self.settings_page.apply_saved_engine_settings(updated_settings.engine)
         message = "引擎设置已保存，后续任务将使用新配置。"
         self.settings_page.show_save_result(True, message)
@@ -261,3 +274,30 @@ class MainWindow(QMainWindow):
         ):
             self._translation_test_runner.deleteLater()
             self._translation_test_runner = None
+
+    def _asr_runtime_summary(self) -> str:
+        """生成创建任务对话框使用的本次识别运行参数摘要。"""
+
+        asr_settings = self.settings.engine.asr
+        hardware = self.asr_hardware_info
+        model_name = (
+            hardware.recommended_model
+            if asr_settings.model_name == "auto"
+            else asr_settings.model_name
+        )
+        device = (
+            hardware.recommended_device
+            if asr_settings.device == "auto"
+            else asr_settings.device
+        )
+        compute_type = (
+            hardware.recommended_compute_type
+            if asr_settings.compute_type == "auto" and device == "cuda"
+            else (
+                "int8"
+                if asr_settings.compute_type == "auto"
+                else asr_settings.compute_type
+            )
+        )
+        device_label = "GPU" if device == "cuda" else "CPU"
+        return f"{model_name} / {device_label} / {compute_type}"

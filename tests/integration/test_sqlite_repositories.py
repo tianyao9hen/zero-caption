@@ -1,5 +1,6 @@
 """SQLite 仓储集成测试，保护应用重启后的数据可见性和状态恢复。"""
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from core.domain.entities import Project, Task
@@ -7,6 +8,7 @@ from core.domain.enums import ProjectStatus, TaskCheckpoint, TaskStatus
 from core.dto.subtitle_dto import SubtitleSegmentDTO
 from core.dto.task_dto import ExportRecordDTO
 from core.domain.enums import ExportMode
+from core.services.task_service import TaskService
 from infrastructure.storage.sqlite_db import SQLiteDatabase
 from infrastructure.storage.sqlite_repositories import (
     SQLiteExportRecordRepository,
@@ -100,3 +102,62 @@ def test_sqlite_task_repository_recovers_running_tasks(tmp_path) -> None:
     assert len(recovered) == 1
     assert recovered[0].status is TaskStatus.PENDING
     assert recovered[0].message == "应用重启后等待恢复"
+
+
+def test_task_service_restores_one_video_history_item_after_restart(tmp_path) -> None:
+    """重启后任务页查询应把同一项目的多个步骤聚合为一个视频条目。"""
+
+    database_path = tmp_path / "zero-caption.sqlite3"
+    database = SQLiteDatabase(database_path)
+    projects = SQLiteProjectRepository(database)
+    tasks = SQLiteTaskRepository(database)
+    started_at = datetime(2026, 8, 16, 8, 0, tzinfo=UTC)
+    project = Project(
+        project_id="project-history",
+        source_video=tmp_path / "history.mp4",
+        source_language="auto",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "projects" / "project-history",
+        created_at=started_at,
+        updated_at=started_at,
+    )
+    project.mark_processing()
+    projects.save(project)
+
+    imported = Task(
+        task_id="task-imported",
+        project_id=project.project_id,
+        task_type="create_project",
+        created_at=started_at,
+    )
+    imported.mark_succeeded("项目已导入", TaskCheckpoint.IMPORTED)
+    translating = Task(
+        task_id="task-translating",
+        project_id=project.project_id,
+        task_type="translate_subtitles",
+        created_at=started_at + timedelta(seconds=1),
+    )
+    translating.update_progress(
+        70,
+        "逐句翻译 3/5",
+        TaskCheckpoint.TRANSCRIBED,
+        "已翻译第 3 条字幕",
+    )
+    tasks.save(imported)
+    tasks.save(translating)
+
+    # act：重新创建数据库和仓储对象，模拟应用关闭后再次进入任务页。
+    reopened = SQLiteDatabase(database_path)
+    service = TaskService(
+        project_repository=SQLiteProjectRepository(reopened),
+        task_repository=SQLiteTaskRepository(reopened),
+    )
+    history = service.list_video_tasks()
+
+    # assert：一个视频只占一行，并采用最近内部任务的状态。
+    assert len(history) == 1
+    assert history[0].project_id == project.project_id
+    assert history[0].source_video.name == "history.mp4"
+    assert history[0].task_id == translating.task_id
+    assert history[0].progress == 70
+    assert history[0].checkpoint == TaskCheckpoint.TRANSCRIBED.value

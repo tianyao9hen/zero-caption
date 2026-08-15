@@ -35,6 +35,7 @@ class ProgressBus:
                 progress=task.progress,
                 current_step=task.current_step,
                 message=task.message,
+                project_id=task.project_id,
             )
         )
 
