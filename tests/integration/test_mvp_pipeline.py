@@ -337,6 +337,7 @@ def test_task_service_can_finish_after_local_transcription_without_translation(
             source_language="en",
             target_language="zh-CN",
             workspace_dir=workspace.root,
+            output_path=tmp_path / "chosen-results" / "demo.srt",
             processing_mode=ProcessingMode.TRANSCRIBE_ONLY,
         )
     )
@@ -346,6 +347,10 @@ def test_task_service_can_finish_after_local_transcription_without_translation(
     assert result.transcription.audio_path.is_file()
     assert result.subtitle_path is not None
     assert result.subtitle_path.is_file()
+    assert result.subtitle_path == tmp_path / "chosen-results" / "demo.srt"
+    assert (
+        result.final_project.workspace_dir / "subtitles" / "source.srt"
+    ).is_file()
     assert result.translation is None
     assert result.export is None
     assert result.final_project.status is ProjectStatus.COMPLETED

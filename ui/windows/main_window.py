@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QTimer
@@ -158,6 +159,7 @@ class MainWindow(QMainWindow):
                 self.settings.engine.translation.is_configured()
             ),
             asr_runtime_summary=self._asr_runtime_summary(),
+            default_output_directory=self.workspace.exports_dir,
         )
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
@@ -202,12 +204,14 @@ class MainWindow(QMainWindow):
         self,
         project_id: str,
         export_mode_value: str,
+        output_path_value: str,
     ) -> None:
-        """在后台使用当前字幕和用户选择的模式重新导出成品。"""
+        """在后台使用当前字幕、模式和用户选择的路径重新导出成品。"""
 
         request = ReexportProjectInput(
             project_id=project_id,
             mode=ExportMode(export_mode_value),
+            output_path=Path(output_path_value),
         )
         task_service = self.task_service
         self._start_project_operation(

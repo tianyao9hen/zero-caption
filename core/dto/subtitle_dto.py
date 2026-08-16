@@ -30,11 +30,14 @@ class TranscribeVideoInput:
 
     `audio_path` 主要用于测试、恢复任务或调用方已经准备好音频的场景。
     常规主链路只传项目编号，识别用例会根据项目记录自行探测并抽取音频。
+    `output_path` 只表示用户希望收到的原文字幕副本；项目内部仍会保留
+    稳定的正式字幕，供缓存、恢复和后续翻译使用。
     """
 
     project_id: str
     audio_path: Path | None = None
     language: str | None = None
+    output_path: Path | None = None
 
 
 @dataclass(slots=True)

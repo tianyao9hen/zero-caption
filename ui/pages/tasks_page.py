@@ -7,16 +7,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -41,7 +45,7 @@ class TasksPage(QWidget):
     # 创建后台线程。这样页面不会承担主流程编排职责。
     create_requested = Signal()
     retry_requested = Signal(str, str)
-    reexport_requested = Signal(str, str)
+    reexport_requested = Signal(str, str, str)
     save_translation_requested = Signal(str, str, str)
     retranslate_requested = Signal(str, str)
 
@@ -151,6 +155,19 @@ class TasksPage(QWidget):
         )
         self.export_mode_combo.addItem("烧录字幕", ExportMode.BURN_IN.value)
         self.export_mode_combo.setEnabled(False)
+        self.reexport_output_edit = QLineEdit()
+        self.reexport_output_edit.setObjectName("reexportOutputPathField")
+        self.reexport_output_edit.setPlaceholderText("选择重新导出的成品文件")
+        self.reexport_output_edit.setEnabled(False)
+        self.reexport_browse_button = QPushButton("浏览...")
+        self.reexport_browse_button.setObjectName("browseReexportOutputButton")
+        self.reexport_browse_button.setEnabled(False)
+        self.reexport_browse_button.clicked.connect(
+            self._browse_reexport_output
+        )
+        reexport_output_row = QHBoxLayout()
+        reexport_output_row.addWidget(self.reexport_output_edit, 1)
+        reexport_output_row.addWidget(self.reexport_browse_button)
         self.reexport_button = QPushButton("重新导出成品")
         self.reexport_button.setObjectName("reexportProjectButton")
         self.reexport_button.setEnabled(False)
@@ -173,6 +190,7 @@ class TasksPage(QWidget):
         details_form.addRow("任务消息", self.message_label)
         details_form.addRow("错误摘要", self.error_label)
         details_form.addRow("项目目录", self.workspace_label)
+        details_form.addRow("成品保存为", reexport_output_row)
 
         self.translation_count_label = QLabel("尚未加载字幕")
         self.subtitle_list = QListWidget()
@@ -405,6 +423,9 @@ class TasksPage(QWidget):
         self._selected_history_value = value
         self._has_complete_translation = False
         self._select_export_mode(value.export_mode)
+        self.reexport_output_edit.setText(
+            str(value.output_path or self._default_reexport_path(value))
+        )
 
         self.source_video_label.setText(str(value.source_video))
         self.project_id_label.setText(value.project_id)
@@ -474,13 +495,84 @@ class TasksPage(QWidget):
         self.retry_requested.emit(value.project_id, value.processing_mode)
 
     def _request_reexport(self) -> None:
-        """把当前项目和用户选择的导出模式发给主窗口。"""
+        """把当前项目、导出模式和用户选择的成品路径发给主窗口。"""
 
         value = self._selected_history_value
         mode_value = self.export_mode_combo.currentData()
         if value is None or not isinstance(mode_value, str):
             return
-        self.reexport_requested.emit(value.project_id, mode_value)
+        output_text = self.reexport_output_edit.text().strip()
+        if not output_text:
+            QMessageBox.warning(self, "无法重新导出", "请选择成品保存位置。")
+            return
+
+        # 后台任务可能在应用重启后运行，持久化前先消除相对路径歧义。
+        output_path = Path(output_text).resolve()
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(
+                value.source_video.suffix or ".mp4"
+            )
+            self.reexport_output_edit.setText(str(output_path))
+        if output_path.exists() and output_path.is_dir():
+            QMessageBox.warning(
+                self,
+                "无法重新导出",
+                "成品保存位置必须是文件路径，不能是目录。",
+            )
+            return
+        if output_path.resolve() == value.source_video.resolve():
+            QMessageBox.warning(
+                self,
+                "无法重新导出",
+                "成品保存路径不能覆盖源视频，请使用其他文件名。",
+            )
+            return
+        if output_path.exists():
+            overwrite = QMessageBox.question(
+                self,
+                "确认覆盖",
+                f"目标文件已经存在，是否覆盖？\n{output_path}",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if overwrite != QMessageBox.StandardButton.Yes:
+                return
+        self.reexport_requested.emit(
+            value.project_id,
+            mode_value,
+            str(output_path),
+        )
+
+    def _browse_reexport_output(self) -> None:
+        """打开文件保存对话框，为重新导出的成品选择完整路径。"""
+
+        value = self._selected_history_value
+        if value is None:
+            return
+        initial_path = self.reexport_output_edit.text().strip()
+        if not initial_path:
+            initial_path = str(self._default_reexport_path(value))
+        suffix = value.source_video.suffix or ".mp4"
+        selected_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择重新导出文件",
+            initial_path,
+            f"视频文件 (*{suffix});;所有文件 (*.*)",
+        )
+        if selected_path:
+            self.reexport_output_edit.setText(selected_path)
+
+    @staticmethod
+    def _default_reexport_path(value: VideoTaskHistoryDTO) -> Path:
+        """为从未导出的旧项目生成不会覆盖源视频的建议路径。"""
+
+        suffix = value.source_video.suffix or ".mp4"
+        return (
+            value.workspace_dir
+            / "exports"
+            / f"{value.source_video.stem}-字幕{suffix}"
+        )
 
     def _select_export_mode(self, mode_value: str) -> None:
         """让导出模式控件显示项目上次保存的选择。"""
@@ -505,6 +597,8 @@ class TasksPage(QWidget):
         )
         self.retry_button.setEnabled(bool(retryable))
         self.export_mode_combo.setEnabled(bool(exportable))
+        self.reexport_output_edit.setEnabled(bool(exportable))
+        self.reexport_browse_button.setEnabled(bool(exportable))
         self.reexport_button.setEnabled(bool(exportable))
 
     def _show_subtitle_item(

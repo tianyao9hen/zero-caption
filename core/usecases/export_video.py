@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from uuid import uuid4
 
 from core.domain.entities import Task
@@ -25,6 +26,13 @@ class ExportVideo:
 
     def execute(self, request: ExportVideoInput) -> ExportVideoResult:
         """执行导出流程。"""
+
+        # 输出覆盖源视频会让外挂复制触发同文件错误，也可能让 FFmpeg 在读取
+        # 输入时截断原文件。这个约束属于核心业务安全边界，不能只依赖 UI。
+        source_path = os.path.normcase(os.path.abspath(request.source_video))
+        output_path = os.path.normcase(os.path.abspath(request.output_path))
+        if source_path == output_path:
+            raise ValueError("成品保存路径不能覆盖源视频，请选择其他文件名。")
 
         project = self.project_repository.get_by_id(request.project_id)
         if project is None:

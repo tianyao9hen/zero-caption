@@ -48,6 +48,8 @@ class Project:
     translation_context: str = ""
     processing_mode: ProcessingMode = ProcessingMode.FULL_PIPELINE
     export_mode: ExportMode = ExportMode.SOFT_SUBTITLE
+    # 这里保存用户可见的主要成果路径：仅识别任务是 `.srt`，完整流程
+    # 是视频成品。项目内部字幕和缓存仍固定放在 `workspace_dir` 下。
     output_path: Path | None = None
     status: ProjectStatus = ProjectStatus.NEW
     created_at: datetime = field(default_factory=_now)

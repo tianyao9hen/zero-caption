@@ -267,7 +267,10 @@ def test_tasks_page_emits_retry_for_failed_project(tmp_path) -> None:
     app.processEvents()
 
 
-def test_tasks_page_emits_reexport_with_selected_mode(tmp_path) -> None:
+def test_tasks_page_emits_reexport_with_selected_mode(
+    tmp_path,
+    monkeypatch,
+) -> None:
     """完整译文项目应允许选择导出模式并请求重新导出。"""
 
     app = QApplication.instance() or QApplication([])
@@ -280,6 +283,7 @@ def test_tasks_page_emits_reexport_with_selected_mode(tmp_path) -> None:
         source_language="en",
         target_language="zh-CN",
         workspace_dir=tmp_path / "project-reexport",
+        output_path=tmp_path / "old-results" / "reexport.mp4",
     )
     project.mark_completed()
     projects.save(project)
@@ -302,18 +306,33 @@ def test_tasks_page_emits_reexport_with_selected_mode(tmp_path) -> None:
             subtitle_repository=subtitles,
         )
     )
-    emitted: list[tuple[str, str]] = []
+    emitted: list[tuple[str, str, str]] = []
     page.reexport_requested.connect(
-        lambda project_id, mode: emitted.append((project_id, mode))
+        lambda project_id, mode, output_path: emitted.append(
+            (project_id, mode, output_path)
+        )
     )
 
     page.refresh_history()
     burn_in_index = page.export_mode_combo.findData(ExportMode.BURN_IN.value)
     page.export_mode_combo.setCurrentIndex(burn_in_index)
+    selected_output = tmp_path / "new-results" / "reexport-final.mp4"
+    monkeypatch.setattr(
+        "ui.pages.tasks_page.QFileDialog.getSaveFileName",
+        lambda *_args, **_kwargs: (str(selected_output), "视频文件"),
+    )
+    page.reexport_browse_button.click()
     page.reexport_button.click()
     app.processEvents()
 
     assert page.reexport_button.isEnabled() is True
-    assert emitted == [(project.project_id, ExportMode.BURN_IN.value)]
+    assert page.reexport_output_edit.text() == str(selected_output)
+    assert emitted == [
+        (
+            project.project_id,
+            ExportMode.BURN_IN.value,
+            str(selected_output),
+        )
+    ]
     page.deleteLater()
     app.processEvents()

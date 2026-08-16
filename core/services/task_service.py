@@ -280,7 +280,17 @@ class TaskService:
 
         # 第二步：本地探测、抽音频、识别并写出原文字幕。
         transcription = self.transcribe_video(
-            TranscribeVideoInput(project_id=created.project.project_id)
+            TranscribeVideoInput(
+                project_id=created.project.project_id,
+                # 仅识别任务的主要成果就是原文字幕，因此把用户选择的
+                # `.srt` 路径交给识别用例。完整流程的同一字段表示视频
+                # 成品路径，不能在这里误当成字幕路径。
+                output_path=(
+                    request.output_path
+                    if request.processing_mode is ProcessingMode.TRANSCRIBE_ONLY
+                    else None
+                ),
+            )
         )
 
         # 仅识别模式到这里已经得到正式原文字幕。此分支不会触碰翻译器或
@@ -389,6 +399,7 @@ class TaskService:
                     project_id=project.project_id,
                     source_video=project.source_video,
                     workspace_dir=project.workspace_dir,
+                    output_path=project.output_path,
                     source_language=project.source_language,
                     target_language=project.target_language,
                     processing_mode=project.processing_mode.value,

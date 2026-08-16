@@ -402,6 +402,36 @@ def test_export_video_builds_export_request_and_returns_record(tmp_path):
     assert exports.get_latest_by_project(project.project_id) == result.export_record
 
 
+def test_export_video_rejects_overwriting_source_video(tmp_path) -> None:
+    """用户选择保存地址时，核心用例必须阻止成品覆盖唯一的源视频。"""
+
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    exports = InMemoryExportRecordRepository()
+    exporter = RecordingVideoExporter()
+    project = _seed_project(tmp_path)
+    projects.save(project)
+    usecase = ExportVideo(
+        project_repository=projects,
+        task_repository=tasks,
+        export_record_repository=exports,
+        exporter=exporter,
+    )
+
+    with pytest.raises(ValueError, match="不能覆盖源视频"):
+        usecase.execute(
+            ExportVideoInput(
+                project_id=project.project_id,
+                source_video=project.source_video,
+                subtitle_path=tmp_path / "subtitles.srt",
+                output_path=project.source_video,
+                mode=ExportMode.BURN_IN,
+            )
+        )
+
+    assert exporter.calls == []
+
+
 def test_translate_subtitles_keeps_completed_sentence_after_later_failure(tmp_path):
     """后续字幕失败时，已完成译文应保留，并在重试时避免重复调用。"""
 

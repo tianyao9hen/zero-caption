@@ -50,7 +50,8 @@ class TranscribeVideo:
 
         参数：
             request：稳定的识别输入 DTO。调用方已经准备好音频时可传
-                `audio_path`，这样用例会跳过媒体探测和抽音频。
+                `audio_path`，这样用例会跳过媒体探测和抽音频；传入
+                `output_path` 时还会把原文字幕写到用户选择的位置。
             project_id：常规主链路的便捷入口。只传项目编号时，
                 用例会从项目记录推导源视频、语言和项目级产物路径。
 
@@ -152,7 +153,21 @@ class TranscribeVideo:
                 if self.srt_writer is not None and subtitle_path is not None:
                     subtitle_path = self.srt_writer.write_file(segments, subtitle_path)
 
-            # 第四步：所有结构化数据和正式字幕都成功保存后，再推进检查点。
+            # 第四步：项目字幕用于缓存和恢复，用户选择的路径则是可直接
+            # 找到的成果副本。复用识别缓存时也重新写出成果，保证用户删除
+            # 旧副本后点击续跑仍能恢复到原保存位置。
+            result_subtitle_path = subtitle_path
+            if request.output_path is not None:
+                if request.output_path.suffix.lower() != ".srt":
+                    raise ValueError("原文字幕的保存路径必须使用 .srt 扩展名。")
+                writer = self._require_dependency(self.srt_writer, "字幕写出器")
+                result_subtitle_path = writer.write_file(
+                    segments,
+                    request.output_path,
+                )
+
+            # 第五步：所有结构化数据、项目字幕和用户成果都成功保存后，
+            # 再推进检查点，避免界面先显示完成而目标文件还没有落盘。
             task.mark_succeeded(
                 runtime_message
                 or ("已复用原文字幕" if reused_transcript else "识别完成"),
@@ -166,7 +181,7 @@ class TranscribeVideo:
                 task=task,
                 source_segments=segments,
                 audio_path=audio_path,
-                subtitle_path=subtitle_path,
+                subtitle_path=result_subtitle_path,
                 media=media,
                 reused_audio=reused_audio,
                 reused_transcript=reused_transcript,

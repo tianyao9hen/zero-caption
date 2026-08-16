@@ -19,6 +19,7 @@ Windows 本地优先的视频字幕生成与翻译桌面应用。
 - 指定字幕译文的手工编辑、持久化保存和单句重新翻译
 - SQLite 项目/任务/字幕/导出记录、旧库迁移和检查点续跑
 - 使用最新译文切换外挂/烧录模式并重新导出已有项目
+- 创建任务和重新导出时可选择用户成果保存位置
 - ASS 字幕、项目日志、诊断包和 Windows 打包烟测脚本
 
 首次启动会在工作区内创建 `zero_caption.sqlite3`，用于保存项目历史和任务状态。
@@ -76,11 +77,12 @@ CUDA 硬件建议以及关键翻译配置是否已经准备好。
 可以通过命令行运行本地识别，不依赖桌面交互页面：
 
 ```powershell
-python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
+python scripts/transcribe_video.py path/to/video.mp4 --source-language auto --output D:\字幕\video.srt
 ```
 
-原文字幕会写入 `data/projects/<project_id>/subtitles/source.srt`。桌面“创建视频任务”表单提供
+原文字幕会保留在项目目录；传入 `--output` 时还会写到指定位置。桌面“创建视频任务”表单提供
 “自动识别语言并生成原文字幕（本地）”处理方式，未配置大模型时会默认选中该方式，并跳过翻译和视频导出。
+表单中的“成果保存目录”允许用户选择新文件位置，并实时预览最终路径。
 
 ## Complete MVP Pipeline
 
@@ -89,7 +91,7 @@ python scripts/transcribe_video.py path/to/video.mp4 --source-language auto
 正式翻译会逐条独立调用模型，并在任务页实时追加原文和译文。配置完成后，可以运行完整无界面主链路：
 
 ```powershell
-python scripts/process_video.py path/to/video.mp4 --source-language auto --target-language zh-CN
+python scripts/process_video.py path/to/video.mp4 --source-language auto --target-language zh-CN --output D:\成品\video-字幕.mp4
 ```
 
 命令会在项目目录中保留原文字幕和译文字幕，并在 `exports/` 下生成视频副本与同名外挂字幕。
@@ -97,4 +99,4 @@ python scripts/process_video.py path/to/video.mp4 --source-language auto --targe
 
 任务失败或应用异常退出后，任务页会显示“从检查点继续”。继续操作沿用原项目编号，
 并复用已经生成的音频、原文字幕和逐句译文。字幕人工修订后，可以在同一页面选择
-外挂字幕或烧录字幕，再点击“重新导出成品”。
+外挂字幕或烧录字幕，选择新的成品文件路径，再点击“重新导出成品”。

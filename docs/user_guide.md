@@ -33,9 +33,10 @@ SQLite 数据库。
 1. 点击窗口顶部或任务页中的“创建视频任务”。
 2. 未配置大模型时，保留默认的“自动识别语言并生成原文字幕（本地）”，再选择本地视频和源语言。
 3. 已配置大模型时，可以选择“自动识别、逐句翻译并导出”，继续设置目标语言、导出模式和可选上下文。
-4. 表单会显示本次实际使用的识别模型、GPU/CPU 和推理精度；需要调整时先到设置页保存新配置。
-5. 点击“创建并开始”后会自动进入任务工作区。左侧一个视频只显示一个任务条目，右侧持续展示当前阶段、总进度、恢复检查点、错误摘要和逐句译文。
-6. 应用重启后任务页会从 SQLite 恢复项目历史；项目页用于展示当前会话最近一次处理结果和产物路径。
+4. 在“成果保存目录”中选择新文件位置，表单会实时预览将生成的字幕和视频路径。仅识别会生成与源视频同名的 `.srt`；完整流程使用“源文件名-字幕”避免覆盖源视频。
+5. 表单会显示本次实际使用的识别模型、GPU/CPU 和推理精度；需要调整时先到设置页保存新配置。
+6. 点击“创建并开始”后会自动进入任务工作区。左侧一个视频只显示一个任务条目，右侧持续展示当前阶段、总进度、恢复检查点、错误摘要和逐句译文。
+7. 应用重启后任务页会从 SQLite 恢复项目历史和成果路径；项目页用于展示当前会话最近一次处理结果和产物路径。
 
 识别和视频处理在后台线程执行，窗口可以继续切换页面。任务状态会先按步骤写入 SQLite，
 再通知界面刷新；应用异常退出后再次启动会把未完成任务标记为待恢复。选择失败或待恢复
@@ -50,7 +51,8 @@ SQLite 数据库。
 
 两种操作都在后台执行，成功后会同时更新 SQLite 和项目目录中的译文 SRT，应用重启后
 仍会显示新结果。单句重译失败时原有译文不会丢失。已经导出或烧录的视频不会自动改变，
-需要在任务详情中选择“外挂字幕”或“烧录字幕”，再点击“重新导出成品”。重新导出会先
+需要在任务详情中选择“外挂字幕”或“烧录字幕”，并在“成品保存为”中选择文件路径，
+再点击“重新导出成品”。重新导出会先
 从 SQLite 中的当前译文重写正式 SRT，确保人工修改后的内容进入新成品。
 
 ## 翻译配置
@@ -66,8 +68,9 @@ SQLite 数据库。
 ## 命令行
 
 ```powershell
-python scripts/process_video.py path/to/video.mp4 --source-language auto --target-language zh-CN
-python scripts/process_video.py path/to/video.mp4 --export-mode burn_in
+python scripts/process_video.py path/to/video.mp4 --source-language auto --target-language zh-CN --output D:\成品\video-字幕.mp4
+python scripts/process_video.py path/to/video.mp4 --export-mode burn_in --output D:\成品\video-烧录.mp4
+python scripts/transcribe_video.py path/to/video.mp4 --output D:\字幕\video.srt
 ```
 
 ## 故障排查

@@ -95,11 +95,13 @@ def test_reexport_project_uses_current_translation_and_updates_mode(tmp_path) ->
         export_video=export_video,
     )
 
-    # act：把导出模式从默认外挂字幕切换为烧录字幕。
+    # act：切换为烧录字幕，并选择一个新的成品保存地址。
+    selected_output = tmp_path / "chosen-results" / "lesson-final.mp4"
     result = usecase.execute(
         ReexportProjectInput(
             project_id=project.project_id,
             mode=ExportMode.BURN_IN,
+            output_path=selected_output,
         )
     )
 
@@ -108,6 +110,8 @@ def test_reexport_project_uses_current_translation_and_updates_mode(tmp_path) ->
     subtitle_path = Path(exporter.requests[0].subtitle_path)
     assert "人工校对后的世界" in subtitle_path.read_text(encoding="utf-8")
     assert result.export_record.mode is ExportMode.BURN_IN
+    assert result.export_record.output_path == selected_output
     assert result.export_record.output_path.read_bytes() == b"exported video"
     assert projects.get_by_id(project.project_id).export_mode is ExportMode.BURN_IN
+    assert projects.get_by_id(project.project_id).output_path == selected_output
     assert projects.get_by_id(project.project_id).status is ProjectStatus.COMPLETED

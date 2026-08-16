@@ -30,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="zh-CN",
         help="项目目标语言；阶段 2 只记录该值，不会发起翻译。",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="原文 SRT 保存路径；不传时只保存到项目工作区。",
+    )
     return parser
 
 
@@ -54,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     # 这里复用桌面应用相同的启动装配，避免命令行入口形成第二套实现。
     context = bootstrap_application()
     task_service = context.container.create_task_service()
+    output_path = args.output.resolve() if args.output is not None else None
 
     # 第二步：创建项目。项目目录和文件指纹由核心用例通过端口完成。
     create_result = task_service.create_project(
@@ -62,13 +69,17 @@ def main(argv: list[str] | None = None) -> int:
             source_language=args.source_language,
             target_language=args.target_language,
             workspace_dir=context.workspace.root,
+            output_path=output_path,
         )
     )
 
     # 第三步：只把项目编号交给识别用例。
     # 源视频、工作目录和语言都来自项目记录，调用方不需要重复拼路径。
     result = task_service.transcribe_video(
-        TranscribeVideoInput(project_id=create_result.project.project_id)
+        TranscribeVideoInput(
+            project_id=create_result.project.project_id,
+            output_path=output_path,
+        )
     )
 
     print(f"项目目录：{create_result.project.workspace_dir}")

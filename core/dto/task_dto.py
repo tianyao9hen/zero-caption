@@ -39,6 +39,7 @@ class VideoTaskHistoryDTO:
     project_id: str
     source_video: Path
     workspace_dir: Path
+    output_path: Path | None
     source_language: str
     target_language: str
     processing_mode: str
