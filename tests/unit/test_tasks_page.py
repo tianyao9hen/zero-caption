@@ -4,11 +4,12 @@ from PySide6.QtWidgets import QApplication
 
 from core.domain.entities import Project, Task
 from core.domain.enums import TaskCheckpoint
-from core.dto.subtitle_dto import TranslationProgressDTO
+from core.dto.subtitle_dto import SubtitleSegmentDTO, TranslationProgressDTO
 from core.dto.task_dto import TaskSummaryDTO
 from core.services.task_service import TaskService
 from infrastructure.storage.memory_repositories import (
     InMemoryProjectRepository,
+    InMemorySubtitleRepository,
     InMemoryTaskRepository,
 )
 from ui.pages.tasks_page import TasksPage
@@ -31,10 +32,10 @@ def test_tasks_page_appends_translation_progress_in_real_time(monkeypatch) -> No
     page.update_translation_progress(progress)
     app.processEvents()
 
-    preview = page.translation_preview.toPlainText()
     assert page.translation_count_label.text() == "已完成 1/2 条"
-    assert "原文：hello" in preview
-    assert "译文：你好" in preview
+    assert page.subtitle_list.count() == 1
+    assert "原文：hello" in page.subtitle_list.item(0).text()
+    assert "译文：你好" in page.subtitle_list.item(0).text()
     page.deleteLater()
     app.processEvents()
 
@@ -149,5 +150,82 @@ def test_tasks_page_prefers_completed_step_over_stale_processing_project(
     summary = page.task_list.item(0).text()
     assert "已完成 · 100%" in summary
     assert "处理中 · 100%" not in summary
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_selects_translation_and_emits_edit_and_retranslate_requests(
+    tmp_path,
+) -> None:
+    """用户应能选中指定字幕，编辑译文并明确请求只重译这一条。"""
+
+    # arrange：准备两条持久化字幕，让页面通过核心服务加载而不是手工塞控件。
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    project = Project(
+        project_id="project-edit",
+        source_video=tmp_path / "edit.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-edit",
+    )
+    project.mark_completed()
+    projects.save(project)
+    completed = Task("task-edit", project.project_id, "translate_subtitles")
+    completed.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    tasks.save(completed)
+    subtitles.save_source_segments(
+        project.project_id,
+        [
+            SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en"),
+            SubtitleSegmentDTO("segment-2", 1_000, 2_000, "world", "en"),
+        ],
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [
+            SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN"),
+            SubtitleSegmentDTO("segment-2", 1_000, 2_000, "世界", "zh-CN"),
+        ],
+    )
+    page = TasksPage(
+        TaskService(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+        )
+    )
+    edit_requests: list[tuple[str, str, str]] = []
+    retranslate_requests: list[tuple[str, str]] = []
+    page.save_translation_requested.connect(
+        lambda project_id, segment_id, text: edit_requests.append(
+            (project_id, segment_id, text)
+        )
+    )
+    page.retranslate_requested.connect(
+        lambda project_id, segment_id: retranslate_requests.append(
+            (project_id, segment_id)
+        )
+    )
+
+    # act：加载项目、选择第二条、修改文本，再分别点击两个显式操作按钮。
+    page.refresh_history()
+    page.subtitle_list.setCurrentRow(1)
+    page.subtitle_translation_editor.setPlainText("手工修订后的世界")
+    page.save_translation_button.click()
+    page.retranslate_button.click()
+    app.processEvents()
+
+    # assert：信号携带稳定字幕编号，不依赖容易变化的界面行号。
+    assert page.subtitle_list.count() == 2
+    assert page.subtitle_source_text.toPlainText() == "world"
+    assert edit_requests == [
+        (project.project_id, "segment-2", "手工修订后的世界")
+    ]
+    assert retranslate_requests == [(project.project_id, "segment-2")]
+
     page.deleteLater()
     app.processEvents()

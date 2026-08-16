@@ -133,6 +133,10 @@ class TranslateSubtitles:
                             total_segments=total_segments,
                             source_text=source_segment.text,
                             translated_text=translated_segment.text,
+                            project_id=project.project_id,
+                            segment_id=source_segment.segment_id,
+                            start_ms=source_segment.start_ms,
+                            end_ms=source_segment.end_ms,
                         )
                     )
 

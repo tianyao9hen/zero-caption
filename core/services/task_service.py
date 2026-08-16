@@ -12,6 +12,10 @@ from core.domain.enums import ProcessingMode
 from core.dto.project_dto import CreateProjectInput, CreateProjectResult
 from core.dto.pipeline_dto import ProcessVideoInput, ProcessVideoResult
 from core.dto.subtitle_dto import (
+    EditSubtitleTranslationInput,
+    RetranslateSubtitleInput,
+    SubtitleTranslationItemDTO,
+    SubtitleTranslationUpdateResult,
     TranscribeVideoInput,
     TranscribeVideoResult,
     TranslateSubtitlesInput,
@@ -23,9 +27,14 @@ from core.dto.task_dto import (
     TaskSummaryDTO,
     VideoTaskHistoryDTO,
 )
-from core.ports.repository import ProjectRepository, TaskRepository
+from core.ports.repository import (
+    ProjectRepository,
+    SubtitleRepository,
+    TaskRepository,
+)
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
+from core.usecases.revise_subtitle_translation import ReviseSubtitleTranslation
 from core.usecases.transcribe_video import TranscribeVideo
 from core.usecases.translate_subtitles import TranslateSubtitles
 
@@ -38,8 +47,10 @@ class TaskService:
     transcribe_video_usecase: TranscribeVideo | None = None
     translate_subtitles_usecase: TranslateSubtitles | None = None
     export_video_usecase: ExportVideo | None = None
+    revise_subtitle_translation_usecase: ReviseSubtitleTranslation | None = None
     project_repository: ProjectRepository | None = None
     task_repository: TaskRepository | None = None
+    subtitle_repository: SubtitleRepository | None = None
     _latest_task_summary: TaskSummaryDTO | None = field(default=None, init=False)
 
     def summary(self) -> str:
@@ -82,6 +93,79 @@ class TaskService:
         """把导出请求交给核心用例。"""
 
         result = self._require_usecase(self.export_video_usecase).execute(request)
+        self._remember_task(result.task)
+        return result
+
+    def list_subtitle_translations(
+        self,
+        project_id: str,
+    ) -> list[SubtitleTranslationItemDTO]:
+        """按原字幕顺序返回项目的原文和译文配对结果。
+
+        该查询只读取结构化字幕，不读取视频或音频。尚未产生译文的原文也会
+        返回，界面可以据此明确展示“尚无译文”，但不会允许把它当成结果修订。
+        """
+
+        project_repository = self._require_dependency(
+            self.project_repository,
+            "项目仓储",
+        )
+        subtitle_repository = self._require_dependency(
+            self.subtitle_repository,
+            "字幕仓储",
+        )
+        project = project_repository.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"未找到项目：{project_id}")
+
+        source_segments = subtitle_repository.get_source_segments(project_id)
+        translated_by_id = {
+            segment.segment_id: segment
+            for segment in subtitle_repository.get_translated_segments(
+                project_id,
+                project.target_language,
+            )
+        }
+        total_segments = len(source_segments)
+        return [
+            SubtitleTranslationItemDTO(
+                project_id=project_id,
+                segment_id=source.segment_id,
+                current_index=index,
+                total_segments=total_segments,
+                start_ms=source.start_ms,
+                end_ms=source.end_ms,
+                source_text=source.text,
+                translated_text=(
+                    translated_by_id[source.segment_id].text
+                    if source.segment_id in translated_by_id
+                    else ""
+                ),
+            )
+            for index, source in enumerate(source_segments, start=1)
+        ]
+
+    def edit_subtitle_translation(
+        self,
+        request: EditSubtitleTranslationInput,
+    ) -> SubtitleTranslationUpdateResult:
+        """保存一条用户编辑的译文，并记录最近任务摘要。"""
+
+        result = self._require_usecase(
+            self.revise_subtitle_translation_usecase
+        ).save_edit(request)
+        self._remember_task(result.task)
+        return result
+
+    def retranslate_subtitle(
+        self,
+        request: RetranslateSubtitleInput,
+    ) -> SubtitleTranslationUpdateResult:
+        """让当前翻译引擎只重新翻译指定的一条字幕。"""
+
+        result = self._require_usecase(
+            self.revise_subtitle_translation_usecase
+        ).retranslate(request)
         self._remember_task(result.task)
         return result
 

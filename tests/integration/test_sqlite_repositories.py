@@ -4,11 +4,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from core.domain.entities import Project, Task
-from core.domain.enums import ProjectStatus, TaskCheckpoint, TaskStatus
-from core.dto.subtitle_dto import SubtitleSegmentDTO
+from core.domain.enums import ExportMode, ProjectStatus, TaskCheckpoint, TaskStatus
+from core.dto.subtitle_dto import (
+    EditSubtitleTranslationInput,
+    SubtitleSegmentDTO,
+)
 from core.dto.task_dto import ExportRecordDTO
-from core.domain.enums import ExportMode
 from core.services.task_service import TaskService
+from core.usecases.revise_subtitle_translation import ReviseSubtitleTranslation
 from infrastructure.storage.sqlite_db import SQLiteDatabase
 from infrastructure.storage.sqlite_repositories import (
     SQLiteExportRecordRepository,
@@ -16,6 +19,7 @@ from infrastructure.storage.sqlite_repositories import (
     SQLiteSubtitleRepository,
     SQLiteTaskRepository,
 )
+from infrastructure.subtitle.srt_writer import SrtWriter
 
 
 def test_sqlite_repositories_round_trip_domain_data(tmp_path) -> None:
@@ -161,3 +165,65 @@ def test_task_service_restores_one_video_history_item_after_restart(tmp_path) ->
     assert history[0].task_id == translating.task_id
     assert history[0].progress == 70
     assert history[0].checkpoint == TaskCheckpoint.TRANSCRIBED.value
+
+
+def test_edited_translation_survives_database_reopen_and_updates_srt(tmp_path) -> None:
+    """手工修订应同时写入 SQLite 和正式字幕文件，重启后仍可读取。"""
+
+    class UnusedTranslator:
+        """手工编辑不应调用翻译端口；若误调用就让测试立即失败。"""
+
+        def translate_segments(self, *args, **kwargs):
+            """拒绝所有意外模型调用。"""
+
+            raise AssertionError("手工编辑不应该调用大模型")
+
+    # arrange：用真实 SQLite 仓储保存一个项目和两条完整字幕。
+    database_path = tmp_path / "revision.sqlite3"
+    database = SQLiteDatabase(database_path)
+    projects = SQLiteProjectRepository(database)
+    tasks = SQLiteTaskRepository(database)
+    subtitles = SQLiteSubtitleRepository(database)
+    project = Project(
+        project_id="project-reopen-edit",
+        source_video=tmp_path / "lesson.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-reopen-edit",
+    )
+    project.mark_completed()
+    projects.save(project)
+    subtitles.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    usecase = ReviseSubtitleTranslation(
+        project_repository=projects,
+        task_repository=tasks,
+        subtitle_repository=subtitles,
+        translator=UnusedTranslator(),
+        subtitle_writer=SrtWriter(),
+    )
+
+    # act：保存编辑后重新创建连接对象，模拟应用退出再启动。
+    result = usecase.save_edit(
+        EditSubtitleTranslationInput(
+            project_id=project.project_id,
+            segment_id="segment-1",
+            translated_text="你好，课程",
+        )
+    )
+    reopened = SQLiteSubtitleRepository(SQLiteDatabase(database_path))
+    restored = reopened.get_translated_segments(
+        project.project_id,
+        project.target_language,
+    )
+
+    # assert：结构化数据和 `SRT` 正文都采用修订后的译文。
+    assert [segment.text for segment in restored] == ["你好，课程"]
+    assert "你好，课程" in result.subtitle_path.read_text(encoding="utf-8")

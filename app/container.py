@@ -30,6 +30,7 @@ from core.ports.repository import (
 from core.services.task_service import TaskService
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
+from core.usecases.revise_subtitle_translation import ReviseSubtitleTranslation
 from core.usecases.transcribe_video import TranscribeVideo
 from core.usecases.translation_model_test import TranslationModelTest
 from core.usecases.translate_subtitles import TranslateSubtitles
@@ -237,6 +238,15 @@ class AppContainer:
             translation_event_publisher=self.progress_bus,
             subtitle_writer=SrtWriter(),
         )
+        revise_subtitle_translation = ReviseSubtitleTranslation(
+            project_repository=self.project_repository,
+            task_repository=self.task_repository,
+            subtitle_repository=self.subtitle_repository,
+            translator=translator,
+            subtitle_writer=SrtWriter(),
+            event_publisher=self.progress_bus,
+            translation_event_publisher=self.progress_bus,
+        )
         export_video = ExportVideo(
             project_repository=self.project_repository,
             task_repository=self.task_repository,
@@ -256,8 +266,10 @@ class AppContainer:
             transcribe_video_usecase=transcribe_video,
             translate_subtitles_usecase=translate_subtitles,
             export_video_usecase=export_video,
+            revise_subtitle_translation_usecase=revise_subtitle_translation,
             project_repository=self.project_repository,
             task_repository=self.task_repository,
+            subtitle_repository=self.subtitle_repository,
         )
 
     def _create_translation_adapter(

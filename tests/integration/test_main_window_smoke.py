@@ -1,12 +1,16 @@
 """主窗口构造烟测，保护启动装配和页面栈不会在创建时崩溃。"""
 
 import logging
+from time import monotonic
 
 from PySide6.QtWidgets import QApplication
 
 from app.container import AppContainer
 from config.settings import EngineSettings, Settings
+from core.domain.entities import Project, Task
+from core.domain.enums import TaskCheckpoint
 from core.dto.asr_dto import AsrHardwareInfoDTO
+from core.dto.subtitle_dto import SubtitleSegmentDTO
 from infrastructure.storage.workspace import WorkspaceManager
 
 
@@ -105,6 +109,70 @@ def test_main_window_refreshes_task_service_after_translation_settings_save(
         == "保存后的新系统提示词"
     )
     assert "后续任务将使用新配置" in window.settings_page.feedback_label.text()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_main_window_saves_selected_subtitle_edit_in_background(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """任务页保存按钮应走后台线程，并把指定译文写回仓储和 `SRT`。"""
+
+    # arrange：在临时工作区准备一个已翻译项目，避免触碰用户真实任务数据。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    workspace.ensure_structure()
+    container = AppContainer(
+        settings=Settings(workspace_root=workspace.root),
+        workspace=workspace,
+        logger=logging.getLogger("test-subtitle-edit"),
+        asr_hardware_info=cpu_hardware_info(),
+    )
+    project = Project(
+        project_id="project-window-edit",
+        source_video=tmp_path / "lesson.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=workspace.projects_dir / "project-window-edit",
+    )
+    project.mark_completed()
+    container.project_repository.save(project)
+    task = Task("task-window-edit", project.project_id, "translate_subtitles")
+    task.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    container.task_repository.save(task)
+    container.subtitle_repository.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    container.subtitle_repository.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    window = container.create_main_window()
+
+    # act：像用户一样在任务页修改文本并点击保存，然后消费 Qt 线程信号。
+    window.navigation.set_current_page(1)
+    window.tasks_page.subtitle_translation_editor.setPlainText("你好，课堂")
+    window.tasks_page.save_translation_button.click()
+    deadline = monotonic() + 3
+    while window._subtitle_revision_runner is not None and monotonic() < deadline:
+        app.processEvents()
+
+    # assert：线程已结束，页面、SQLite 仓储和正式字幕文件保持一致。
+    assert window._subtitle_revision_runner is None
+    saved = container.subtitle_repository.get_translated_segments(
+        project.project_id,
+        project.target_language,
+    )
+    assert [segment.text for segment in saved] == ["你好，课堂"]
+    assert window.tasks_page.subtitle_translation_editor.toPlainText() == "你好，课堂"
+    subtitle_path = project.workspace_dir / "subtitles" / "translated-zh-CN.srt"
+    assert "你好，课堂" in subtitle_path.read_text(encoding="utf-8")
 
     window.close()
     window.deleteLater()

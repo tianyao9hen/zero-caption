@@ -18,6 +18,8 @@ class StatusBarWidget(QWidget):
         "create_project": "导入视频",
         "transcribe_video": "生成字幕",
         "translate_subtitles": "逐句翻译",
+        "edit_subtitle_translation": "编辑单句译文",
+        "retranslate_subtitle": "重新翻译单句",
         "export_video": "导出视频",
     }
 

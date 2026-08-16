@@ -24,7 +24,12 @@ from PySide6.QtWidgets import (
 from config.settings import EngineSettings, Settings, TranslationSettings
 from core.dto.asr_dto import AsrHardwareInfoDTO
 from core.dto.pipeline_dto import ProcessVideoResult
-from core.dto.subtitle_dto import TranslationProgressDTO
+from core.dto.subtitle_dto import (
+    EditSubtitleTranslationInput,
+    RetranslateSubtitleInput,
+    SubtitleTranslationUpdateResult,
+    TranslationProgressDTO,
+)
 from core.services.task_service import TaskService
 from infrastructure.storage.workspace import WorkspaceManager
 from infrastructure.task.progress_bus import ProgressBus
@@ -35,6 +40,7 @@ from ui.pages.tasks_page import TasksPage
 from ui.widgets.navigation import NavigationWidget
 from ui.widgets.status_bar import StatusBarWidget
 from ui.viewmodels.pipeline_runner import PipelineRunner
+from ui.viewmodels.subtitle_revision_runner import SubtitleRevisionRunner
 from ui.viewmodels.translation_test_runner import TranslationTestRunner
 
 
@@ -67,6 +73,7 @@ class MainWindow(QMainWindow):
         self.progress_bus = progress_bus
         self._pipeline_runner: PipelineRunner | None = None
         self._translation_test_runner: TranslationTestRunner | None = None
+        self._subtitle_revision_runner: SubtitleRevisionRunner | None = None
         self.setWindowTitle(settings.app_name)
         self.resize(1200, 800)
 
@@ -101,6 +108,12 @@ class MainWindow(QMainWindow):
             self._handle_translation_test_requested
         )
         self.tasks_page.create_requested.connect(self.open_import_dialog)
+        self.tasks_page.save_translation_requested.connect(
+            self._handle_subtitle_edit_requested
+        )
+        self.tasks_page.retranslate_requested.connect(
+            self._handle_subtitle_retranslation_requested
+        )
         self.tasks_page.refresh_history()
 
         root = QWidget()
@@ -274,6 +287,112 @@ class MainWindow(QMainWindow):
         ):
             self._translation_test_runner.deleteLater()
             self._translation_test_runner = None
+
+    def _handle_subtitle_edit_requested(
+        self,
+        project_id: str,
+        segment_id: str,
+        translated_text: str,
+    ) -> None:
+        """把用户手工编辑提交给统一的字幕修订后台线程。"""
+
+        self._start_subtitle_revision(
+            EditSubtitleTranslationInput(
+                project_id=project_id,
+                segment_id=segment_id,
+                translated_text=translated_text,
+            ),
+            "正在保存当前译文……",
+        )
+
+    def _handle_subtitle_retranslation_requested(
+        self,
+        project_id: str,
+        segment_id: str,
+    ) -> None:
+        """使用当前大模型配置在后台重新翻译选中的一条字幕。"""
+
+        if not self.settings.engine.translation.is_configured():
+            self.tasks_page.show_subtitle_update_error(
+                "重新翻译前，请先在设置页保存可用的大模型配置。"
+            )
+            return
+        self._start_subtitle_revision(
+            RetranslateSubtitleInput(
+                project_id=project_id,
+                segment_id=segment_id,
+            ),
+            "正在调用大模型重新翻译这一条……",
+        )
+
+    def _start_subtitle_revision(
+        self,
+        request: EditSubtitleTranslationInput | RetranslateSubtitleInput,
+        message: str,
+    ) -> None:
+        """校验并启动单条字幕修订，避免与完整视频流程并发写入。"""
+
+        if self._pipeline_runner is not None and self._pipeline_runner.isRunning():
+            self.tasks_page.show_subtitle_update_error(
+                "完整视频任务运行期间不能修改字幕，请等待当前任务完成。"
+            )
+            return
+        if (
+            self._subtitle_revision_runner is not None
+            and self._subtitle_revision_runner.isRunning()
+        ):
+            self.tasks_page.show_subtitle_update_error(
+                "已有一条字幕正在保存或重新翻译。"
+            )
+            return
+
+        self.tasks_page.set_subtitle_action_running(True, message)
+        self._subtitle_revision_runner = SubtitleRevisionRunner(
+            task_service=self.task_service,
+            request=request,
+        )
+        self._subtitle_revision_runner.succeeded.connect(
+            self._handle_subtitle_revision_success
+        )
+        self._subtitle_revision_runner.failed.connect(
+            self._handle_subtitle_revision_failure
+        )
+        self._subtitle_revision_runner.finished.connect(
+            self._release_subtitle_revision_runner
+        )
+        self._subtitle_revision_runner.start()
+
+    def _handle_subtitle_revision_success(
+        self,
+        result: SubtitleTranslationUpdateResult,
+    ) -> None:
+        """刷新持久化任务和选中字幕，并提示成品视频不会自动更新。"""
+
+        self.tasks_page.refresh_history(select_project_id=result.project_id)
+        message = (
+            f"第 {result.item.current_index} 条译文已更新："
+            f"{result.subtitle_path}。已导出的视频不会自动改变。"
+        )
+        self.tasks_page.show_subtitle_update_result(result.item, message)
+        self.status_widget.show_message(
+            f"第 {result.item.current_index} 条字幕译文已更新。"
+        )
+
+    def _handle_subtitle_revision_failure(self, message: str) -> None:
+        """在任务页保留当前编辑文本并展示后台修订错误。"""
+
+        self.tasks_page.show_subtitle_update_error(f"字幕更新失败：{message}")
+        self.status_widget.show_message("字幕更新失败。")
+
+    def _release_subtitle_revision_runner(self) -> None:
+        """释放已结束的单句修订线程，允许继续处理其他字幕。"""
+
+        if (
+            self._subtitle_revision_runner is not None
+            and not self._subtitle_revision_runner.isRunning()
+        ):
+            self._subtitle_revision_runner.deleteLater()
+            self._subtitle_revision_runner = None
 
     def _asr_runtime_summary(self) -> str:
         """生成创建任务对话框使用的本次识别运行参数摘要。"""

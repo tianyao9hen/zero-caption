@@ -90,3 +90,53 @@ class TranslationProgressDTO:
     total_segments: int
     source_text: str
     translated_text: str
+    project_id: str = ""
+    segment_id: str = ""
+    start_ms: int = 0
+    end_ms: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SubtitleTranslationItemDTO:
+    """表示任务页中一条可选择和编辑的字幕翻译结果。
+
+    该对象把本地原文和译文配成一行，供界面显示使用；它不携带
+    API 密钥、媒体内容或数据库对象，因此可以安全地跨线程传递。
+    """
+
+    project_id: str
+    segment_id: str
+    current_index: int
+    total_segments: int
+    start_ms: int
+    end_ms: int
+    source_text: str
+    translated_text: str
+
+
+@dataclass(slots=True)
+class EditSubtitleTranslationInput:
+    """描述用户手工保存一条译文时提交的内容。"""
+
+    project_id: str
+    segment_id: str
+    translated_text: str
+
+
+@dataclass(slots=True)
+class RetranslateSubtitleInput:
+    """描述只让大模型重新翻译一条原文字幕的请求。"""
+
+    project_id: str
+    segment_id: str
+    context: str | None = None
+
+
+@dataclass(slots=True)
+class SubtitleTranslationUpdateResult:
+    """描述单条译文更新后的持久化结果和正式字幕文件。"""
+
+    project_id: str
+    task: Task
+    item: SubtitleTranslationItemDTO
+    subtitle_path: Path

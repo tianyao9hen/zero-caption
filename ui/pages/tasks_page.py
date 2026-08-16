@@ -24,7 +24,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.dto.subtitle_dto import TranslationProgressDTO
+from core.dto.subtitle_dto import (
+    SubtitleTranslationItemDTO,
+    TranslationProgressDTO,
+)
 from core.dto.task_dto import TaskSummaryDTO, VideoTaskHistoryDTO
 from core.services.task_service import TaskService
 
@@ -35,11 +38,15 @@ class TasksPage(QWidget):
     # 页面只发出“用户想创建任务”的意图，主窗口负责打开参数对话框并
     # 创建后台线程。这样页面不会承担主流程编排职责。
     create_requested = Signal()
+    save_translation_requested = Signal(str, str, str)
+    retranslate_requested = Signal(str, str)
 
     _TASK_TYPE_LABELS = {
         "create_project": "导入视频",
         "transcribe_video": "生成字幕",
         "translate_subtitles": "逐句翻译",
+        "edit_subtitle_translation": "编辑单句译文",
+        "retranslate_subtitle": "重新翻译单句",
         "export_video": "导出视频",
     }
     _STATUS_LABELS = {
@@ -66,6 +73,7 @@ class TasksPage(QWidget):
 
         super().__init__()
         self.task_service = task_service
+        self._subtitle_action_running = False
 
         # 左侧区域沿用桌面任务工具常见的操作方式：创建入口固定在顶部，
         # 历史视频按最近更新时间排列，选择一项后在右侧查看详细状态。
@@ -137,29 +145,78 @@ class TasksPage(QWidget):
         details_form.addRow("错误摘要", self.error_label)
         details_form.addRow("项目目录", self.workspace_label)
 
-        self.translation_count_label = QLabel("尚未开始翻译")
-        self.translation_preview = QPlainTextEdit()
-        self.translation_preview.setObjectName("translationLivePreview")
-        self.translation_preview.setReadOnly(True)
-        self.translation_preview.setPlaceholderText(
-            "逐句翻译开始后，原文和译文会实时追加到这里。"
+        self.translation_count_label = QLabel("尚未加载字幕")
+        self.subtitle_list = QListWidget()
+        self.subtitle_list.setObjectName("subtitleTranslationList")
+        self.subtitle_list.setSpacing(3)
+        self.subtitle_list.currentItemChanged.connect(
+            self._show_subtitle_item
         )
-        self.translation_preview.document().setMaximumBlockCount(20_000)
+
+        self.selected_subtitle_label = QLabel("请选择一条已有译文的字幕")
+        self.selected_subtitle_label.setWordWrap(True)
+        self.subtitle_source_text = QPlainTextEdit()
+        self.subtitle_source_text.setObjectName("selectedSubtitleSourceText")
+        self.subtitle_source_text.setReadOnly(True)
+        self.subtitle_source_text.setPlaceholderText("这里显示选中字幕的原文。")
+        self.subtitle_source_text.setMaximumHeight(72)
+
+        self.subtitle_translation_editor = QPlainTextEdit()
+        self.subtitle_translation_editor.setObjectName(
+            "selectedSubtitleTranslationEditor"
+        )
+        self.subtitle_translation_editor.setPlaceholderText(
+            "选择已有译文后，可在这里修改翻译结果。"
+        )
+        self.subtitle_translation_editor.setMaximumHeight(88)
+
+        self.save_translation_button = QPushButton("保存当前译文")
+        self.save_translation_button.setObjectName("saveSubtitleTranslationButton")
+        self.save_translation_button.setEnabled(False)
+        self.save_translation_button.clicked.connect(
+            self._request_save_translation
+        )
+        self.retranslate_button = QPushButton("重新翻译这一条")
+        self.retranslate_button.setObjectName("retranslateSubtitleButton")
+        self.retranslate_button.setEnabled(False)
+        self.retranslate_button.clicked.connect(self._request_retranslation)
+        translation_actions = QHBoxLayout()
+        translation_actions.addWidget(self.save_translation_button)
+        translation_actions.addWidget(self.retranslate_button)
+        translation_actions.addStretch(1)
+
+        self.subtitle_feedback_label = QLabel(
+            "手工保存和重新翻译只更新字幕文件；已导出的视频不会自动改变。"
+        )
+        self.subtitle_feedback_label.setWordWrap(True)
 
         detail_group = QGroupBox("任务详情")
         detail_layout = QVBoxLayout(detail_group)
         detail_layout.addLayout(details_form)
         detail_layout.addWidget(self.progress_bar)
 
-        translation_group = QGroupBox("逐句翻译实时结果")
+        translation_group = QGroupBox("字幕翻译结果与单句修订")
         translation_layout = QVBoxLayout(translation_group)
         translation_layout.addWidget(self.translation_count_label)
-        translation_layout.addWidget(self.translation_preview, 1)
-        detail_layout.addWidget(translation_group, 1)
+        translation_layout.addWidget(self.subtitle_list, 1)
+        translation_layout.addWidget(self.selected_subtitle_label)
+        translation_layout.addWidget(QLabel("原文"))
+        translation_layout.addWidget(self.subtitle_source_text)
+        translation_layout.addWidget(QLabel("译文"))
+        translation_layout.addWidget(self.subtitle_translation_editor)
+        translation_layout.addLayout(translation_actions)
+        translation_layout.addWidget(self.subtitle_feedback_label)
+
+        detail_splitter = QSplitter(Qt.Orientation.Vertical)
+        detail_splitter.addWidget(detail_group)
+        detail_splitter.addWidget(translation_group)
+        detail_splitter.setStretchFactor(0, 0)
+        detail_splitter.setStretchFactor(1, 1)
+        detail_splitter.setSizes([300, 470])
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(history_group)
-        splitter.addWidget(detail_group)
+        splitter.addWidget(detail_splitter)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([340, 820])
@@ -219,7 +276,8 @@ class TasksPage(QWidget):
         self.error_label.setText("无")
         self.progress_bar.setValue(0)
         self.translation_count_label.setText("等待字幕翻译")
-        self.translation_preview.clear()
+        self.subtitle_list.clear()
+        self._clear_subtitle_editor()
 
     def update_summary(self, summary: TaskSummaryDTO) -> None:
         """用最新任务摘要刷新详情，并更新对应视频的列表条目。"""
@@ -237,23 +295,56 @@ class TasksPage(QWidget):
         self._upsert_live_summary(summary)
 
     def update_translation_progress(self, progress: TranslationProgressDTO) -> None:
-        """把后台刚完成的一条原文和译文追加到实时结果区。"""
+        """把后台刚完成的一条译文实时更新到可选择的字幕列表。"""
+
+        selected_project_id = self.project_id_label.text()
+        if (
+            progress.project_id
+            and selected_project_id not in {"-", progress.project_id}
+        ):
+            return
 
         self.translation_count_label.setText(
             f"已完成 {progress.current_index}/{progress.total_segments} 条"
         )
-        self.translation_preview.appendPlainText(
-            "\n".join(
-                [
-                    f"[{progress.current_index}/{progress.total_segments}]",
-                    f"原文：{progress.source_text}",
-                    f"译文：{progress.translated_text}",
-                    "",
-                ]
+        self._upsert_subtitle_item(
+            SubtitleTranslationItemDTO(
+                project_id=progress.project_id or selected_project_id,
+                segment_id=progress.segment_id or f"live-{progress.current_index}",
+                current_index=progress.current_index,
+                total_segments=progress.total_segments,
+                start_ms=progress.start_ms,
+                end_ms=progress.end_ms,
+                source_text=progress.source_text,
+                translated_text=progress.translated_text,
             )
         )
-        scroll_bar = self.translation_preview.verticalScrollBar()
-        scroll_bar.setValue(scroll_bar.maximum())
+
+    def set_subtitle_action_running(self, running: bool, message: str) -> None:
+        """切换单句修订的忙碌状态，避免用户重复提交同一操作。"""
+
+        self._subtitle_action_running = running
+        current = self._selected_subtitle()
+        has_translation = bool(current and current.translated_text.strip())
+        self.save_translation_button.setEnabled(not running and has_translation)
+        self.retranslate_button.setEnabled(not running and has_translation)
+        self.subtitle_translation_editor.setReadOnly(running)
+        self.subtitle_feedback_label.setText(message)
+
+    def show_subtitle_update_result(
+        self,
+        item: SubtitleTranslationItemDTO,
+        message: str,
+    ) -> None:
+        """展示核心服务返回的新译文，并恢复编辑按钮。"""
+
+        self._upsert_subtitle_item(item, select=True)
+        self.set_subtitle_action_running(False, message)
+
+    def show_subtitle_update_error(self, message: str) -> None:
+        """在页面内展示修订错误，同时保留用户编辑中的文本。"""
+
+        self.set_subtitle_action_running(False, message)
 
     def _show_history_item(
         self,
@@ -283,6 +374,174 @@ class TasksPage(QWidget):
         self.error_label.setText(value.error_message or "无")
         self.workspace_label.setText(str(value.workspace_dir))
         self.progress_bar.setValue(value.progress)
+        self._load_subtitle_translations(value.project_id)
+
+    def _load_subtitle_translations(
+        self,
+        project_id: str,
+        select_segment_id: str | None = None,
+    ) -> None:
+        """通过核心服务加载项目字幕，不让页面直接访问仓储。"""
+
+        try:
+            items = self.task_service.list_subtitle_translations(project_id)
+        except (RuntimeError, ValueError) as exc:
+            self.subtitle_list.clear()
+            self.translation_count_label.setText(f"字幕暂不可用：{exc}")
+            self._clear_subtitle_editor()
+            return
+
+        self.subtitle_list.clear()
+        selected_item: QListWidgetItem | None = None
+        translated_count = 0
+        for item_value in items:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, item_value)
+            self._update_subtitle_item_text(item, item_value)
+            self.subtitle_list.addItem(item)
+            if item_value.translated_text.strip():
+                translated_count += 1
+            if item_value.segment_id == select_segment_id:
+                selected_item = item
+
+        if not items:
+            self.translation_count_label.setText("这个项目尚未生成原文字幕")
+            self._clear_subtitle_editor()
+            return
+        self.translation_count_label.setText(
+            f"已有译文 {translated_count}/{len(items)} 条"
+        )
+        self.subtitle_list.setCurrentItem(selected_item or self.subtitle_list.item(0))
+
+    def _show_subtitle_item(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None,
+    ) -> None:
+        """把选中字幕的原文和译文填入编辑区域。"""
+
+        if current is None:
+            self._clear_subtitle_editor()
+            return
+        value = current.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(value, SubtitleTranslationItemDTO):
+            self._clear_subtitle_editor()
+            return
+
+        self.selected_subtitle_label.setText(
+            f"第 {value.current_index}/{value.total_segments} 条 · "
+            f"{self._format_timestamp(value.start_ms)} → "
+            f"{self._format_timestamp(value.end_ms)}"
+        )
+        self.subtitle_source_text.setPlainText(value.source_text)
+        self.subtitle_translation_editor.setPlainText(value.translated_text)
+        has_translation = bool(value.translated_text.strip())
+        enabled = has_translation and not self._subtitle_action_running
+        self.save_translation_button.setEnabled(enabled)
+        self.retranslate_button.setEnabled(enabled)
+
+    def _request_save_translation(self) -> None:
+        """校验当前选择，并把手工译文保存意图发给主窗口。"""
+
+        value = self._selected_subtitle()
+        translated_text = self.subtitle_translation_editor.toPlainText().strip()
+        if value is None:
+            self.subtitle_feedback_label.setText("请先选择一条字幕。")
+            return
+        if not translated_text:
+            self.subtitle_feedback_label.setText("字幕译文不能为空。")
+            return
+        self.save_translation_requested.emit(
+            value.project_id,
+            value.segment_id,
+            translated_text,
+        )
+
+    def _request_retranslation(self) -> None:
+        """把当前选中字幕的单句重译意图发给主窗口。"""
+
+        value = self._selected_subtitle()
+        if value is None or not value.translated_text.strip():
+            self.subtitle_feedback_label.setText("请先选择一条已有译文的字幕。")
+            return
+        self.retranslate_requested.emit(value.project_id, value.segment_id)
+
+    def _selected_subtitle(self) -> SubtitleTranslationItemDTO | None:
+        """返回当前选中的字幕 DTO，不把列表行号当成业务编号。"""
+
+        current = self.subtitle_list.currentItem()
+        if current is None:
+            return None
+        value = current.data(Qt.ItemDataRole.UserRole)
+        return value if isinstance(value, SubtitleTranslationItemDTO) else None
+
+    def _upsert_subtitle_item(
+        self,
+        value: SubtitleTranslationItemDTO,
+        select: bool = False,
+    ) -> None:
+        """按字幕编号更新实时结果；不存在时按原文序号插入。"""
+
+        target_item: QListWidgetItem | None = None
+        for row in range(self.subtitle_list.count()):
+            item = self.subtitle_list.item(row)
+            existing = item.data(Qt.ItemDataRole.UserRole)
+            if (
+                isinstance(existing, SubtitleTranslationItemDTO)
+                and existing.segment_id == value.segment_id
+            ):
+                target_item = item
+                break
+
+        if target_item is None:
+            target_item = QListWidgetItem()
+            insert_row = max(0, min(value.current_index - 1, self.subtitle_list.count()))
+            self.subtitle_list.insertItem(insert_row, target_item)
+        target_item.setData(Qt.ItemDataRole.UserRole, value)
+        self._update_subtitle_item_text(target_item, value)
+        if select or self.subtitle_list.currentItem() is target_item:
+            self.subtitle_list.setCurrentItem(target_item)
+            self._show_subtitle_item(target_item, None)
+
+    def _update_subtitle_item_text(
+        self,
+        item: QListWidgetItem,
+        value: SubtitleTranslationItemDTO,
+    ) -> None:
+        """生成包含序号、时间、原文和译文的两行列表摘要。"""
+
+        translated_text = value.translated_text or "（尚无译文）"
+        item.setText(
+            "\n".join(
+                [
+                    (
+                        f"{value.current_index}. "
+                        f"{self._format_timestamp(value.start_ms)}  "
+                        f"原文：{value.source_text}"
+                    ),
+                    f"译文：{translated_text}",
+                ]
+            )
+        )
+        item.setToolTip(f"字幕编号：{value.segment_id}")
+
+    def _clear_subtitle_editor(self) -> None:
+        """清空选择区并禁用需要已有译文的操作。"""
+
+        self.selected_subtitle_label.setText("请选择一条已有译文的字幕")
+        self.subtitle_source_text.clear()
+        self.subtitle_translation_editor.clear()
+        self.save_translation_button.setEnabled(False)
+        self.retranslate_button.setEnabled(False)
+
+    @staticmethod
+    def _format_timestamp(milliseconds: int) -> str:
+        """把毫秒转换为紧凑的界面时间，便于定位视频位置。"""
+
+        safe_value = max(0, milliseconds)
+        minutes, remainder = divmod(safe_value, 60_000)
+        seconds, millis = divmod(remainder, 1_000)
+        return f"{minutes:02}:{seconds:02}.{millis:03}"
 
     def _upsert_live_summary(self, summary: TaskSummaryDTO) -> None:
         """把当前进度合并到对应视频条目，不为每个内部步骤新增一行。"""
@@ -303,7 +562,15 @@ class TasksPage(QWidget):
         if not isinstance(value, VideoTaskHistoryDTO):
             return
 
-        if summary.status == "failed":
+        revision_task_types = {
+            "edit_subtitle_translation",
+            "retranslate_subtitle",
+        }
+        if summary.task_type in revision_task_types:
+            # 单句修订是项目完成后的附加动作。它的失败只属于本次操作，
+            # 不能把整个视频项目的持久化状态伪装成失败或处理中。
+            project_status = value.project_status
+        elif summary.status == "failed":
             project_status = "failed"
         elif summary.status == "running":
             project_status = "processing"
@@ -380,6 +647,11 @@ class TasksPage(QWidget):
         但最近识别任务已经 succeeded，此时显示“已完成”更符合事实。
         """
 
+        if value.task_type in {
+            "edit_subtitle_translation",
+            "retranslate_subtitle",
+        }:
+            return value.task_status or value.project_status
         if value.project_status in {"completed", "failed"}:
             return value.project_status
         return value.task_status or value.project_status
