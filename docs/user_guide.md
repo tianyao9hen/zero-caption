@@ -3,7 +3,10 @@
 ## 首次启动
 
 双击 `ZeroCaption-0.1.0-win64-setup.exe` 完成安装，再从开始菜单打开“Zero Caption”。
-安装包默认写入当前用户的 `%LOCALAPPDATA%\Programs\ZeroCaption`，不需要管理员权限。
+安装包默认写入当前用户的 `%LOCALAPPDATA%\Programs\ZeroCaption`，不需要管理员权限；
+安装向导会显示目录选择页，也可以浏览或输入其他安装位置。自定义位置必须是空目录或
+已有的 Zero Caption 安装目录，请不要选择存放个人文件的共享目录，因为卸载时会清空
+整个安装目录。
 发布版已经携带 Python、VC 运行库、Qt、FFmpeg、ffprobe、`faster-whisper`、`cuBLAS 12`，以及
 `small`、`medium` 两套本地识别模型，不要求用户另外安装或在首次任务时下载这些内容。
 程序会在当前用户数据目录的工作区中创建项目目录、缓存目录、导出目录、日志目录和
@@ -70,7 +73,8 @@ python scripts/process_video.py path/to/video.mp4 --export-mode burn_in
 ## 故障排查
 
 - 安装包旁的 `.sha256` 文件可用于核对下载文件是否完整。
-- 可以在 Windows“已安装的应用”中卸载 Zero Caption；项目与用户配置会保留在 `%LOCALAPPDATA%\ZeroCaption`。
+- 可以在 Windows“已安装的应用”中卸载 Zero Caption。卸载器会完整删除安装目录，并询问是否同时清理历史记录。
+- 卸载时选择“否”会保留 `%LOCALAPPDATA%\ZeroCaption` 中的项目、字幕、缓存、日志和设置；选择“是”会永久删除这些数据。主动导出到其他目录的文件不属于应用历史，不会被卸载器删除。
 - 使用 `python scripts/check_runtime.py` 检查 FFmpeg、ffprobe、两套内置 ASR 模型、GPU 建议和翻译配置。
 - CUDA 不可用时查看设置页硬件建议；应用会继续使用 CPU，不会阻止本地字幕生成。
 - 查看应用级 `logs/app.log` 和项目目录下的 `logs/project.jsonl`。

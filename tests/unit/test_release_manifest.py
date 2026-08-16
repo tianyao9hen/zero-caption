@@ -1,7 +1,7 @@
 """Windows 发布清单的静态契约测试。
 
 真实安装和启动由 PowerShell 验收脚本负责，这里用快速单元测试保护几个容易在维护时
-被误删的发布约束：单用户安装、完整复制便携目录、生成卸载程序以及隔离环境验收。
+被误删的发布约束：可选安装目录、完整复制便携目录、安全卸载以及隔离环境验收。
 """
 
 from __future__ import annotations
@@ -13,17 +13,61 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_installer_manifest_copies_complete_portable_directory() -> None:
-    """安装清单应递归复制完整发布目录，并使用无管理员权限的用户安装位置。"""
+    """安装清单应递归复制发布目录，并始终向用户展示目录选择页面。"""
 
     manifest = (PROJECT_ROOT / "installer" / "ZeroCaption.iss").read_text(
         encoding="utf-8-sig"
     )
 
     assert "DefaultDirName={localappdata}\\Programs\\ZeroCaption" in manifest
+    assert "DisableDirPage=no" in manifest
     assert "PrivilegesRequired=lowest" in manifest
-    assert 'Source: "..\\dist\\ZeroCaption\\*"' in manifest
+    assert '#define MyPayloadSource "..\\dist\\ZeroCaption\\*"' in manifest
+    assert '#ifdef InstallerSmokeTest' in manifest
     assert "recursesubdirs" in manifest
+    assert 'DestName: "{#MyInstallMarkerName}"' in manifest
+    assert "IsSafeInstallDirectory(InstallDirectory)" in manifest
+    assert "if WizardSilent then" in manifest
+    assert "procedure CurStepChanged(CurStep: TSetupStep);" in manifest
+    assert "if CurStep <> ssInstall then" in manifest
+    assert "Abort;" in manifest
     assert "UninstallDisplayName={#MyAppName}" in manifest
+
+
+def test_uninstaller_clears_install_files_and_asks_before_history_cleanup() -> None:
+    """卸载器应清空应用目录，但只有用户明确同意后才删除本机历史记录。"""
+
+    manifest = (PROJECT_ROOT / "installer" / "ZeroCaption.iss").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert 'Type: filesandordirs; Name: "{app}\\*"' in manifest
+    assert 'Type: dirifempty; Name: "{app}"' in manifest
+    assert "function InitializeUninstall(): Boolean;" in manifest
+    assert "是否同时清理 Zero Caption 的历史记录" in manifest
+    assert "MB_YESNO or MB_DEFBUTTON2" in manifest
+    assert "if not UninstallSilent then" in manifest
+    assert "'/CLEANHISTORY'" in manifest
+    assert "IsSafeTestHistoryDirectory(TestHistoryDirectory)" in manifest
+    assert "'{param:TESTHISTORYROOT|}'" in manifest
+    assert "DelTree(UserDataDirectory, True, True, True)" in manifest
+
+
+def test_installer_verifier_covers_both_history_cleanup_choices() -> None:
+    """安装包验收应覆盖自选目录、保留历史以及显式清理历史三条路径。"""
+
+    verifier = (
+        PROJECT_ROOT / "scripts" / "verify_installer.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert "custom install location\\Zero Caption" in verifier
+    assert "Assert-RejectsUnsafeInstallDirectory" in verifier
+    assert "personal-file.txt" in verifier
+    assert "history-preserved.marker" in verifier
+    assert "runtime-generated-residue.tmp" in verifier
+    assert "$uninstallArguments += '/CLEANHISTORY'" in verifier
+    assert "-TestHistoryDirectory $historyRoot" in verifier
+    assert "选择清理后仍残留历史记录目录" in verifier
 
 
 def test_release_verifier_removes_local_development_dependencies() -> None:

@@ -47,6 +47,11 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
 - `dist/ZeroCaption/`：免安装便携目录。
 - `dist/installer/ZeroCaption-0.1.0-win64-setup.exe`：推荐给最终用户的单用户安装包。
 
+安装向导始终提供安装目录选择页。为保证卸载时能够彻底清除程序文件，自定义目录必须
+是空目录或已有的 Zero Caption 安装目录，不要把软件直接装进存放个人文件的共享目录。
+卸载时会清空安装目录，并询问是否同时删除 `%LOCALAPPDATA%\ZeroCaption` 中的项目历史、
+字幕、缓存、日志和本机设置；选择保留后，重新安装仍可继续使用原有数据。
+
 两个版本均已包含 Python、VC 运行库、Qt、FFmpeg、ffprobe、`faster-whisper`、
 `cuBLAS 12` 运行依赖，以及 `small`、`medium` 两套本地模型。自动模式会在可用的 5GB 以上
 NVIDIA CUDA GPU 上选择 `medium + float16`，无可用 GPU 时选择 `small + CPU + int8`。

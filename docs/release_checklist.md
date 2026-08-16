@@ -22,7 +22,10 @@
 
 - [ ] 执行 `scripts/build_windows.ps1`，脚本会生成便携目录、安装包和 SHA256 文件。
 - [ ] 或单独执行 `scripts/verify_packaged_app.ps1`，从没有仓库源码的目录启动 `dist/ZeroCaption/ZeroCaption.exe`。
-- [ ] 执行 `scripts/verify_installer.ps1`，确认静默安装、隔离环境启动和卸载清理均通过。
+- [ ] 执行 `scripts/verify_installer.ps1`，确认带空格的自选目录安装、隔离环境启动和卸载清理均通过。
+- [ ] 确认安装向导始终显示目录选择页，并拒绝不属于 Zero Caption 的非空目录。
+- [ ] 确认普通卸载会清空安装目录并询问是否清理历史记录，默认选择“否”。
+- [ ] 分别确认“保留历史”不会删除 `%LOCALAPPDATA%\ZeroCaption`，“清理历史”会删除该应用专属目录。
 - [ ] 验收环境必须清除 `PYTHONHOME`、`PYTHONPATH`、虚拟环境和 Hugging Face 缓存变量，并把 PATH 限制到 Windows 系统目录。
 - [ ] 确认安装目录包含 Python、VC 运行库、Qt、CTranslate2、`cuBLAS 12`、ONNX Runtime、FFmpeg、ffprobe 和 `small`、`medium` 两套模型。
 - [ ] 确认首次启动会创建工作区、日志目录和 `zero_caption.sqlite3`。
