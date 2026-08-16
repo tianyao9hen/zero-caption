@@ -207,6 +207,26 @@ def test_retranslate_calls_model_once_for_selected_source_and_keeps_other_line(
     assert result.item.translated_text == "新的世界"
 
 
+def test_retranslate_reuses_context_saved_with_project(tmp_path) -> None:
+    """单句重译未另传上下文时，应复用最初视频任务保存的上下文。"""
+
+    translator = RecordingTranslator("带术语的译文")
+    usecase, project, _subtitles, _tasks, _publisher = _build_usecase(
+        tmp_path,
+        translator,
+    )
+    project.translation_context = "课程术语：agent 译为智能体"
+
+    usecase.retranslate(
+        RetranslateSubtitleInput(
+            project_id=project.project_id,
+            segment_id="segment-2",
+        )
+    )
+
+    assert translator.calls[0][3] == "课程术语：agent 译为智能体"
+
+
 def test_retranslate_failure_preserves_old_translation_and_records_failed_task(
     tmp_path,
 ) -> None:

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from config.settings import EngineSettings, Settings, TranslationSettings
 from core.dto.asr_dto import AsrHardwareInfoDTO
+from core.domain.enums import ExportMode, ProcessingMode
 from core.dto.pipeline_dto import ProcessVideoResult
 from core.dto.subtitle_dto import (
     EditSubtitleTranslationInput,
@@ -31,6 +32,7 @@ from core.dto.subtitle_dto import (
     TranslationProgressDTO,
 )
 from core.services.task_service import TaskService
+from core.dto.task_dto import ExportVideoResult, ReexportProjectInput
 from infrastructure.storage.workspace import WorkspaceManager
 from infrastructure.task.progress_bus import ProgressBus
 from ui.dialogs.import_dialog import ImportDialog
@@ -108,6 +110,12 @@ class MainWindow(QMainWindow):
             self._handle_translation_test_requested
         )
         self.tasks_page.create_requested.connect(self.open_import_dialog)
+        self.tasks_page.retry_requested.connect(
+            self._handle_retry_requested
+        )
+        self.tasks_page.reexport_requested.connect(
+            self._handle_reexport_requested
+        )
         self.tasks_page.save_translation_requested.connect(
             self._handle_subtitle_edit_requested
         )
@@ -155,12 +163,74 @@ class MainWindow(QMainWindow):
             return
 
         request = dialog.to_request(self.workspace.root)
+        task_service = self.task_service
         # 创建完成后停留在任务工作区，让用户立即看到视频条目、当前阶段
         # 和逐句译文，而不是在任务运行期间反复切换页面寻找反馈。
         self.navigation.set_current_page(1)
         self.tasks_page.show_running()
-        self._pipeline_runner = PipelineRunner(self.task_service, request)
-        self._pipeline_runner.succeeded.connect(self._handle_pipeline_success)
+        self._start_project_operation(
+            operation=lambda: task_service.process_video(request),
+            success_handler=self._handle_pipeline_success,
+            message="正在创建并处理视频任务……",
+        )
+
+    def _handle_retry_requested(
+        self,
+        project_id: str,
+        processing_mode_value: str,
+    ) -> None:
+        """在后台继续失败或应用重启后待恢复的已有项目。"""
+
+        processing_mode = ProcessingMode(processing_mode_value)
+        if (
+            processing_mode is ProcessingMode.FULL_PIPELINE
+            and not self.settings.engine.translation.is_configured()
+        ):
+            self.tasks_page.set_project_action_running(
+                False,
+                "完整流程恢复前，请先在设置页保存可用的大模型配置。",
+            )
+            return
+        task_service = self.task_service
+        self._start_project_operation(
+            operation=lambda: task_service.retry_video(project_id),
+            success_handler=self._handle_pipeline_success,
+            message="正在从已有检查点继续处理……",
+        )
+
+    def _handle_reexport_requested(
+        self,
+        project_id: str,
+        export_mode_value: str,
+    ) -> None:
+        """在后台使用当前字幕和用户选择的模式重新导出成品。"""
+
+        request = ReexportProjectInput(
+            project_id=project_id,
+            mode=ExportMode(export_mode_value),
+        )
+        task_service = self.task_service
+        self._start_project_operation(
+            operation=lambda: task_service.reexport_project(request),
+            success_handler=self._handle_reexport_success,
+            message="正在使用当前字幕重新导出成品……",
+        )
+
+    def _start_project_operation(
+        self,
+        operation: Callable[[], object],
+        success_handler: Callable[[object], None],
+        message: str,
+    ) -> None:
+        """统一启动一个视频级后台操作并连接结果信号。"""
+
+        if self._pipeline_runner is not None and self._pipeline_runner.isRunning():
+            QMessageBox.information(self, "任务进行中", "请等待当前视频任务完成。")
+            return
+        self.navigation.set_current_page(1)
+        self.tasks_page.set_project_action_running(True, message)
+        self._pipeline_runner = PipelineRunner(operation)
+        self._pipeline_runner.succeeded.connect(success_handler)
         self._pipeline_runner.failed.connect(self._handle_pipeline_failure)
         self._pipeline_runner.finished.connect(self._release_pipeline_runner)
         self._pipeline_runner.start()
@@ -198,12 +268,23 @@ class MainWindow(QMainWindow):
         self.status_widget.show_message(f"处理失败：{message}")
         QMessageBox.critical(self, "处理失败", message)
 
+    def _handle_reexport_success(self, result: ExportVideoResult) -> None:
+        """刷新项目历史，并展示重新导出的最新文件路径。"""
+
+        self.tasks_page.refresh_history(
+            select_project_id=result.project.project_id
+        )
+        output_path = result.export_record.output_path
+        self.status_widget.show_message(f"重新导出完成：{output_path}")
+
     def _release_pipeline_runner(self) -> None:
         """在线程结束后释放引用，允许用户提交下一次任务。"""
 
         if self._pipeline_runner is not None and not self._pipeline_runner.isRunning():
             self._pipeline_runner.deleteLater()
             self._pipeline_runner = None
+            self.tasks_page.set_project_action_running(False)
+            self.tasks_page.refresh_history()
 
     def _handle_engine_settings_save(self, value: object) -> None:
         """保存识别与翻译配置，并重建后续任务使用的服务。"""

@@ -30,6 +30,7 @@ from core.ports.repository import (
 from core.services.task_service import TaskService
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
+from core.usecases.reexport_project import ReexportProject
 from core.usecases.revise_subtitle_translation import ReviseSubtitleTranslation
 from core.usecases.transcribe_video import TranscribeVideo
 from core.usecases.translation_model_test import TranslationModelTest
@@ -261,11 +262,18 @@ class AppContainer:
             ),
             event_publisher=self.progress_bus,
         )
+        reexport_project = ReexportProject(
+            project_repository=self.project_repository,
+            subtitle_repository=self.subtitle_repository,
+            subtitle_writer=SrtWriter(),
+            export_video=export_video,
+        )
         return TaskService(
             create_project_usecase=create_project,
             transcribe_video_usecase=transcribe_video,
             translate_subtitles_usecase=translate_subtitles,
             export_video_usecase=export_video,
+            reexport_project_usecase=reexport_project,
             revise_subtitle_translation_usecase=revise_subtitle_translation,
             project_repository=self.project_repository,
             task_repository=self.task_repository,

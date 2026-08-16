@@ -41,6 +41,8 @@ class VideoTaskHistoryDTO:
     workspace_dir: Path
     source_language: str
     target_language: str
+    processing_mode: str
+    export_mode: str
     project_status: str
     task_id: str
     task_type: str
@@ -64,6 +66,19 @@ class ExportVideoInput:
     subtitle_path: Path
     output_path: Path
     mode: ExportMode
+
+
+@dataclass(slots=True)
+class ReexportProjectInput:
+    """描述用户使用当前字幕重新导出已有项目的请求。
+
+    `output_path` 留空时继续使用项目上次保存的路径；如果项目从未导出，
+    核心用例会回退到项目自己的 `exports/` 目录。
+    """
+
+    project_id: str
+    mode: ExportMode
+    output_path: Path | None = None
 
 
 @dataclass(slots=True)

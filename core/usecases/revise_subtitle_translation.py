@@ -119,7 +119,11 @@ class ReviseSubtitleTranslation:
                 segments=[source_segment],
                 source_language=project.source_language,
                 target_language=project.target_language,
-                context=request.context,
+                context=(
+                    request.context
+                    if request.context is not None
+                    else project.translation_context or None
+                ),
             )
             if len(result) != 1 or not result[0].text.strip():
                 raise ValueError("单句重新翻译必须返回且只返回一条非空字幕。")

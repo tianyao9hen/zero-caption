@@ -51,6 +51,10 @@ class SQLiteDatabase:
                     target_language TEXT NOT NULL,
                     workspace_dir TEXT NOT NULL,
                     source_fingerprint TEXT NOT NULL DEFAULT '',
+                    translation_context TEXT NOT NULL DEFAULT '',
+                    processing_mode TEXT NOT NULL DEFAULT 'full_pipeline',
+                    export_mode TEXT NOT NULL DEFAULT 'soft_subtitle',
+                    output_path TEXT,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -111,4 +115,51 @@ class SQLiteDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
                 """
+            )
+
+            # 早期版本已经创建过 `projects` 表。`CREATE TABLE IF NOT EXISTS`
+            # 不会自动给旧表补列，因此这里执行小型迁移，让用户原有数据库
+            # 可以直接升级，不需要删除任务历史或手工运行 SQL。
+            self._ensure_columns(
+                connection,
+                table_name="projects",
+                columns={
+                    "translation_context": "TEXT NOT NULL DEFAULT ''",
+                    "processing_mode": (
+                        "TEXT NOT NULL DEFAULT 'full_pipeline'"
+                    ),
+                    "export_mode": "TEXT NOT NULL DEFAULT 'soft_subtitle'",
+                    "output_path": "TEXT",
+                },
+            )
+
+    @staticmethod
+    def _ensure_columns(
+        connection: sqlite3.Connection,
+        table_name: str,
+        columns: dict[str, str],
+    ) -> None:
+        """为旧版 SQLite 表补充当前版本需要的列。
+
+        参数：
+            connection：当前初始化事务使用的数据库连接。
+            table_name：需要检查的表名，只能来自模块内固定常量。
+            columns：列名到 SQLite 类型声明的映射。
+
+        该方法只在应用启动建库时运行，不负责业务数据迁移。列名和声明均由
+        代码内常量提供，不接收用户输入，因此可以安全拼入 `ALTER TABLE`。
+        """
+
+        existing_columns = {
+            row["name"]
+            for row in connection.execute(
+                f"PRAGMA table_info({table_name})"
+            ).fetchall()
+        }
+        for column_name, declaration in columns.items():
+            if column_name in existing_columns:
+                continue
+            connection.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN "
+                f"{column_name} {declaration}"
             )

@@ -1,14 +1,14 @@
 """面向任务的应用服务模块。
 
-这个服务紧贴 core 层。UI 应该通过这种服务获取任务状态，而不是直接操作队列。
-当前骨架里的行为还很少，但它已经标出了未来任务创建、进度更新和状态查询的入口位置。
+这个服务紧贴 `core` 层。UI 通过它发起视频处理、恢复、重新导出和字幕
+修订，并查询持久化状态，而不是直接操作队列、仓储或基础设施适配器。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from core.domain.enums import ProcessingMode
+from core.domain.enums import ProcessingMode, ProjectStatus, TaskStatus
 from core.dto.project_dto import CreateProjectInput, CreateProjectResult
 from core.dto.pipeline_dto import ProcessVideoInput, ProcessVideoResult
 from core.dto.subtitle_dto import (
@@ -24,6 +24,7 @@ from core.dto.subtitle_dto import (
 from core.dto.task_dto import (
     ExportVideoInput,
     ExportVideoResult,
+    ReexportProjectInput,
     TaskSummaryDTO,
     VideoTaskHistoryDTO,
 )
@@ -34,6 +35,7 @@ from core.ports.repository import (
 )
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
+from core.usecases.reexport_project import ReexportProject
 from core.usecases.revise_subtitle_translation import ReviseSubtitleTranslation
 from core.usecases.transcribe_video import TranscribeVideo
 from core.usecases.translate_subtitles import TranslateSubtitles
@@ -47,6 +49,7 @@ class TaskService:
     transcribe_video_usecase: TranscribeVideo | None = None
     translate_subtitles_usecase: TranslateSubtitles | None = None
     export_video_usecase: ExportVideo | None = None
+    reexport_project_usecase: ReexportProject | None = None
     revise_subtitle_translation_usecase: ReviseSubtitleTranslation | None = None
     project_repository: ProjectRepository | None = None
     task_repository: TaskRepository | None = None
@@ -93,6 +96,18 @@ class TaskService:
         """把导出请求交给核心用例。"""
 
         result = self._require_usecase(self.export_video_usecase).execute(request)
+        self._remember_task(result.task)
+        return result
+
+    def reexport_project(
+        self,
+        request: ReexportProjectInput,
+    ) -> ExportVideoResult:
+        """使用已有项目的当前译文重新导出视频。"""
+
+        result = self._require_usecase(self.reexport_project_usecase).execute(
+            request
+        )
         self._remember_task(result.task)
         return result
 
@@ -184,8 +199,84 @@ class TaskService:
                 source_language=request.source_language,
                 target_language=request.target_language,
                 workspace_dir=request.workspace_dir,
+                translation_context=(request.context or "").strip(),
+                processing_mode=request.processing_mode,
+                export_mode=request.export_mode,
+                output_path=request.output_path,
             )
         )
+
+        return self._continue_project(created, request)
+
+    def retry_video(self, project_id: str) -> ProcessVideoResult:
+        """从已有项目的稳定产物继续一次失败或待恢复的视频任务。
+
+        该方法不会创建新项目。识别、翻译用例会分别检查音频、原字幕和
+        逐句译文缓存，因此已经成功的高成本步骤不会重复执行。
+        """
+
+        project_repository = self._require_dependency(
+            self.project_repository,
+            "项目仓储",
+        )
+        task_repository = self._require_dependency(
+            self.task_repository,
+            "任务仓储",
+        )
+        project = project_repository.get_by_id(project_id)
+        if project is None:
+            raise ValueError(f"未找到项目：{project_id}")
+
+        tasks = task_repository.list_by_project(project_id)
+        latest_task = tasks[0] if tasks else None
+        can_retry = project.status is ProjectStatus.FAILED or (
+            project.status is ProjectStatus.PROCESSING
+            and latest_task is not None
+            and latest_task.status is TaskStatus.PENDING
+        )
+        if not can_retry:
+            raise ValueError("只有失败或应用重启后待恢复的任务可以继续。")
+        if latest_task is None:
+            raise RuntimeError("项目没有可用于恢复的任务记录。")
+
+        # 第一步：恢复结果仍沿用最初的导入任务和项目编号。
+        # `ProcessVideoResult` 因而可以继续被项目页和命令行入口共同消费。
+        import_task = next(
+            (task for task in tasks if task.task_type == "create_project"),
+            None,
+        )
+        if import_task is None:
+            raise RuntimeError("项目缺少原始导入任务，无法安全恢复。")
+
+        # 第二步：所有恢复前置条件满足后再增加原失败任务的重试次数。
+        # 历史页会聚合项目内最大值，因此后续新任务不会把计数重新显示为零。
+        latest_task.increment_retry()
+        latest_task.message = f"用户已请求第 {latest_task.retry_count} 次继续处理"
+        task_repository.save(latest_task)
+
+        project.mark_processing()
+        project_repository.save(project)
+        request = ProcessVideoInput(
+            source_video=project.source_video,
+            source_language=project.source_language,
+            target_language=project.target_language,
+            workspace_dir=project.workspace_dir,
+            context=project.translation_context or None,
+            output_path=project.output_path,
+            export_mode=project.export_mode,
+            processing_mode=project.processing_mode,
+        )
+        return self._continue_project(
+            CreateProjectResult(project=project, task=import_task),
+            request,
+        )
+
+    def _continue_project(
+        self,
+        created: CreateProjectResult,
+        request: ProcessVideoInput,
+    ) -> ProcessVideoResult:
+        """在已经存在的项目上继续识别、翻译和导出步骤。"""
 
         # 第二步：本地探测、抽音频、识别并写出原文字幕。
         transcription = self.transcribe_video(
@@ -233,6 +324,15 @@ class TaskService:
                 / "exports"
                 / request.source_video.name
             )
+        created.project.output_path = output_path
+        created.project.export_mode = request.export_mode
+        created.project.translation_context = (request.context or "").strip()
+        created.project.touch()
+        # 完整桌面装配会注入项目仓储，从而在导出前保存恢复参数。
+        # 少量只验证用例顺序的轻量测试没有查询依赖，仍可依靠同一个内存实体
+        # 继续执行，不应为此强制它们装配与测试目标无关的仓储入口。
+        if self.project_repository is not None:
+            self.project_repository.save(created.project)
         export = self.export_video(
             ExportVideoInput(
                 project_id=created.project.project_id,
@@ -291,6 +391,8 @@ class TaskService:
                     workspace_dir=project.workspace_dir,
                     source_language=project.source_language,
                     target_language=project.target_language,
+                    processing_mode=project.processing_mode.value,
+                    export_mode=project.export_mode.value,
                     project_status=project.status.value,
                     task_id=latest_task.task_id if latest_task else "",
                     task_type=latest_task.task_type if latest_task else "",
@@ -308,7 +410,10 @@ class TaskService:
                     error_message=(
                         latest_task.error_message if latest_task else ""
                     ),
-                    retry_count=latest_task.retry_count if latest_task else 0,
+                    retry_count=max(
+                        (task.retry_count for task in tasks),
+                        default=0,
+                    ),
                     created_at=project.created_at,
                     updated_at=project.updated_at,
                 )

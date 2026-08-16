@@ -2,9 +2,16 @@
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import sqlite3
 
 from core.domain.entities import Project, Task
-from core.domain.enums import ExportMode, ProjectStatus, TaskCheckpoint, TaskStatus
+from core.domain.enums import (
+    ExportMode,
+    ProcessingMode,
+    ProjectStatus,
+    TaskCheckpoint,
+    TaskStatus,
+)
 from core.dto.subtitle_dto import (
     EditSubtitleTranslationInput,
     SubtitleSegmentDTO,
@@ -37,6 +44,10 @@ def test_sqlite_repositories_round_trip_domain_data(tmp_path) -> None:
         source_language="en",
         target_language="zh-CN",
         workspace_dir=tmp_path / "projects" / "project-1",
+        translation_context="课程术语：agent 译为智能体",
+        processing_mode=ProcessingMode.FULL_PIPELINE,
+        export_mode=ExportMode.BURN_IN,
+        output_path=tmp_path / "exports" / "lesson.mp4",
     )
     project.mark_imported()
     task = Task(task_id="task-1", project_id=project.project_id, task_type="demo")
@@ -72,6 +83,10 @@ def test_sqlite_repositories_round_trip_domain_data(tmp_path) -> None:
     assert restored_project is not None
     assert restored_project.status is ProjectStatus.IMPORTED
     assert restored_project.source_video == project.source_video
+    assert restored_project.translation_context == project.translation_context
+    assert restored_project.processing_mode is ProcessingMode.FULL_PIPELINE
+    assert restored_project.export_mode is ExportMode.BURN_IN
+    assert restored_project.output_path == project.output_path
     assert restored_task is not None
     assert restored_task.checkpoint is TaskCheckpoint.AUDIO_EXTRACTED
     assert restored_task.progress == 40
@@ -79,6 +94,49 @@ def test_sqlite_repositories_round_trip_domain_data(tmp_path) -> None:
     assert restored_translation[0].text == "你好"
     assert restored_export is not None
     assert restored_export.mode is ExportMode.SOFT_SUBTITLE
+
+
+def test_sqlite_database_migrates_legacy_project_request_columns(tmp_path) -> None:
+    """旧版项目表应自动补充恢复请求列，不要求用户删除历史数据库。"""
+
+    # arrange：直接创建升级前的项目表和一条历史记录，模拟用户已有数据。
+    database_path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE projects (
+                project_id TEXT PRIMARY KEY,
+                source_video TEXT NOT NULL,
+                source_language TEXT NOT NULL,
+                target_language TEXT NOT NULL,
+                workspace_dir TEXT NOT NULL,
+                source_fingerprint TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_error TEXT NOT NULL DEFAULT ''
+            );
+            INSERT INTO projects (
+                project_id, source_video, source_language, target_language,
+                workspace_dir, status, created_at, updated_at
+            ) VALUES (
+                'legacy-project', 'legacy.mp4', 'en', 'zh-CN', 'legacy-workspace',
+                'completed', '2026-08-16T08:00:00+00:00',
+                '2026-08-16T08:00:00+00:00'
+            );
+            """
+        )
+
+    # act：常规初始化应在同一数据库上执行增量迁移。
+    repository = SQLiteProjectRepository(SQLiteDatabase(database_path))
+    restored = repository.get_by_id("legacy-project")
+
+    # assert：历史记录仍在，并获得兼容旧版本的安全默认请求参数。
+    assert restored is not None
+    assert restored.translation_context == ""
+    assert restored.processing_mode is ProcessingMode.FULL_PIPELINE
+    assert restored.export_mode is ExportMode.SOFT_SUBTITLE
+    assert restored.output_path is None
 
 
 def test_sqlite_task_repository_recovers_running_tasks(tmp_path) -> None:

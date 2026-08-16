@@ -11,7 +11,13 @@ from datetime import datetime
 from pathlib import Path
 
 from core.domain.entities import Project, Task
-from core.domain.enums import ProjectStatus, TaskCheckpoint, TaskStatus
+from core.domain.enums import (
+    ExportMode,
+    ProcessingMode,
+    ProjectStatus,
+    TaskCheckpoint,
+    TaskStatus,
+)
 from core.dto.subtitle_dto import SubtitleSegmentDTO
 from core.dto.task_dto import ExportRecordDTO
 from infrastructure.storage.sqlite_db import SQLiteDatabase
@@ -43,15 +49,20 @@ class SQLiteProjectRepository:
                 """
                 INSERT INTO projects (
                     project_id, source_video, source_language, target_language,
-                    workspace_dir, source_fingerprint, status, created_at,
+                    workspace_dir, source_fingerprint, translation_context,
+                    processing_mode, export_mode, output_path, status, created_at,
                     updated_at, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     source_video=excluded.source_video,
                     source_language=excluded.source_language,
                     target_language=excluded.target_language,
                     workspace_dir=excluded.workspace_dir,
                     source_fingerprint=excluded.source_fingerprint,
+                    translation_context=excluded.translation_context,
+                    processing_mode=excluded.processing_mode,
+                    export_mode=excluded.export_mode,
+                    output_path=excluded.output_path,
                     status=excluded.status,
                     updated_at=excluded.updated_at,
                     last_error=excluded.last_error
@@ -63,6 +74,10 @@ class SQLiteProjectRepository:
                     project.target_language,
                     str(project.workspace_dir),
                     project.source_fingerprint,
+                    project.translation_context,
+                    project.processing_mode.value,
+                    project.export_mode.value,
+                    str(project.output_path) if project.output_path else None,
                     project.status.value,
                     _encode_time(project.created_at),
                     _encode_time(project.updated_at),
@@ -101,6 +116,10 @@ class SQLiteProjectRepository:
             target_language=row["target_language"],
             workspace_dir=Path(row["workspace_dir"]),
             source_fingerprint=row["source_fingerprint"],
+            translation_context=row["translation_context"],
+            processing_mode=ProcessingMode(row["processing_mode"]),
+            export_mode=ExportMode(row["export_mode"]),
+            output_path=Path(row["output_path"]) if row["output_path"] else None,
             status=ProjectStatus(row["status"]),
             created_at=_decode_time(row["created_at"]),
             updated_at=_decode_time(row["updated_at"]),

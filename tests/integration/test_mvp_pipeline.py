@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from core.domain.enums import (
     ExportMode,
     ProcessingMode,
@@ -60,9 +62,13 @@ class FakeMediaProbe:
 class FakeAudioExtractor:
     """用占位字节模拟音频抽取产物。"""
 
+    def __init__(self) -> None:
+        self.call_count = 0
+
     def extract_audio(self, source_path: Path, output_path: Path) -> Path:
         """在项目临时目录写入占位音频文件。"""
 
+        self.call_count += 1
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"fake wav")
         return output_path
@@ -71,6 +77,9 @@ class FakeAudioExtractor:
 class FakeAsrEngine:
     """返回固定原文字幕，避免测试下载本地模型。"""
 
+    def __init__(self) -> None:
+        self.call_count = 0
+
     def transcribe(
         self,
         audio_path: Path,
@@ -78,6 +87,7 @@ class FakeAsrEngine:
     ) -> list[SubtitleSegmentDTO]:
         """生成两条连续的原文字幕。"""
 
+        self.call_count += 1
         return [
             SubtitleSegmentDTO("seg-1", 0, 1_000, "hello", language or "en"),
             SubtitleSegmentDTO("seg-2", 1_000, 2_000, "world", language or "en"),
@@ -109,6 +119,34 @@ class FakeTranslator:
             )
             for segment in segments
         ]
+
+
+class FailingSecondOnceTranslator(FakeTranslator):
+    """第一次处理第二条字幕时失败，随后恢复为正常翻译器。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed_once = False
+
+    def translate_segments(
+        self,
+        segments: list[SubtitleSegmentDTO],
+        source_language: str,
+        target_language: str,
+        context: str | None = None,
+    ) -> list[SubtitleSegmentDTO]:
+        """记录失败调用，使重试测试可以区分首次和恢复后的请求。"""
+
+        if self.call_count == 1 and not self.failed_once:
+            self.call_count += 1
+            self.failed_once = True
+            raise RuntimeError("模拟第二条字幕翻译失败")
+        return super().translate_segments(
+            segments,
+            source_language,
+            target_language,
+            context,
+        )
 
 
 def test_task_service_runs_complete_mvp_pipeline_and_reuses_translation(tmp_path) -> None:
@@ -311,3 +349,86 @@ def test_task_service_can_finish_after_local_transcription_without_translation(
     assert result.translation is None
     assert result.export is None
     assert result.final_project.status is ProjectStatus.COMPLETED
+
+
+def test_task_service_retries_existing_project_and_reuses_completed_steps(
+    tmp_path,
+) -> None:
+    """翻译中断后继续同一项目时，应复用音频、原字幕和已完成译文。"""
+
+    # arrange：第二条字幕第一次请求会失败，其他适配器记录高成本调用次数。
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    exports = InMemoryExportRecordRepository()
+    audio_extractor = FakeAudioExtractor()
+    asr_engine = FakeAsrEngine()
+    translator = FailingSecondOnceTranslator()
+    source_video = tmp_path / "retry.mp4"
+    source_video.write_bytes(b"fake video")
+    service = TaskService(
+        create_project_usecase=CreateProject(
+            project_repository=projects,
+            task_repository=tasks,
+            project_workspace=workspace,
+            fingerprint_calculator=Sha256FileFingerprintCalculator(),
+        ),
+        transcribe_video_usecase=TranscribeVideo(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+            media_probe=FakeMediaProbe(),
+            audio_extractor=audio_extractor,
+            asr_engine=asr_engine,
+            subtitle_formatter=SubtitleFormatter(),
+            subtitle_aligner=SubtitleAligner(),
+            srt_writer=SrtWriter(),
+        ),
+        translate_subtitles_usecase=TranslateSubtitles(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+            translator=translator,
+            subtitle_writer=SrtWriter(),
+        ),
+        export_video_usecase=ExportVideo(
+            project_repository=projects,
+            task_repository=tasks,
+            export_record_repository=exports,
+            exporter=SoftSubtitleExporter(),
+        ),
+        project_repository=projects,
+        task_repository=tasks,
+        subtitle_repository=subtitles,
+    )
+    request = ProcessVideoInput(
+        source_video=source_video,
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=workspace.root,
+        context="课程术语：world 译为世界",
+    )
+
+    # act：首次处理在第二条翻译失败，随后用户显式继续已有项目。
+    with pytest.raises(RuntimeError, match="模拟第二条字幕翻译失败"):
+        service.process_video(request)
+    failed_project = projects.list_all()[0]
+    first_project_id = failed_project.project_id
+    assert failed_project.translation_context == request.context
+    assert len(
+        subtitles.get_translated_segments(first_project_id, "zh-CN")
+    ) == 1
+
+    result = service.retry_video(first_project_id)
+
+    # assert：项目编号不变，高成本本地步骤只执行一次，模型只补请求缺失第二条。
+    assert result.final_project.project_id == first_project_id
+    assert result.final_project.status is ProjectStatus.COMPLETED
+    assert audio_extractor.call_count == 1
+    assert asr_engine.call_count == 1
+    assert translator.call_count == 3
+    assert result.export is not None
+    assert result.export.export_record.output_path.is_file()
+    history = service.list_video_tasks()
+    assert history[0].retry_count == 1

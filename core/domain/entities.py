@@ -10,7 +10,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .enums import ProjectStatus, TaskCheckpoint, TaskStatus
+from .enums import (
+    ExportMode,
+    ProcessingMode,
+    ProjectStatus,
+    TaskCheckpoint,
+    TaskStatus,
+)
 
 
 def _now() -> datetime:
@@ -27,9 +33,10 @@ def _now() -> datetime:
 class Project:
     """表示应用正在跟踪的一个视频项目。
 
-    这个实体只保存项目的稳定业务信息，例如源文件、语言设置、
-    工作区目录和最近一次错误摘要。它不直接负责文件复制、
-    队列调度或数据库写入，这些都属于其他层。
+    这个实体保存项目的稳定业务信息，例如源文件、语言设置、处理模式、
+    翻译上下文、导出参数和最近一次错误摘要。持久化这些请求参数后，
+    应用重启才能继续原项目。实体本身不负责文件复制、队列调度或数据库
+    写入，这些都属于其他层。
     """
 
     project_id: str
@@ -38,6 +45,10 @@ class Project:
     target_language: str
     workspace_dir: Path
     source_fingerprint: str = ""
+    translation_context: str = ""
+    processing_mode: ProcessingMode = ProcessingMode.FULL_PIPELINE
+    export_mode: ExportMode = ExportMode.SOFT_SUBTITLE
+    output_path: Path | None = None
     status: ProjectStatus = ProjectStatus.NEW
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)

@@ -11,16 +11,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.domain.entities import Project, Task
+from core.domain.enums import ExportMode, ProcessingMode
 
 
 @dataclass(slots=True)
 class CreateProjectInput:
-    """描述创建项目用例所需的输入参数。"""
+    """描述创建项目用例所需的输入参数。
+
+    处理模式、翻译上下文和导出参数会随项目一起持久化，后续失败重试
+    才能在应用重启后还原用户最初确认的请求，而不是依赖界面内存状态。
+    """
 
     source_video: Path
     source_language: str
     target_language: str
     workspace_dir: Path
+    translation_context: str = ""
+    processing_mode: ProcessingMode = ProcessingMode.FULL_PIPELINE
+    export_mode: ExportMode = ExportMode.SOFT_SUBTITLE
+    output_path: Path | None = None
 
 
 @dataclass(slots=True)

@@ -57,6 +57,10 @@ class CreateProject:
             target_language=request.target_language,
             workspace_dir=workspace_dir,
             source_fingerprint=source_fingerprint,
+            translation_context=request.translation_context.strip(),
+            processing_mode=request.processing_mode,
+            export_mode=request.export_mode,
+            output_path=request.output_path,
         )
         project.mark_imported()
 

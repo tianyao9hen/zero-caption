@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import QApplication
 
 from core.domain.entities import Project, Task
-from core.domain.enums import TaskCheckpoint
+from core.domain.enums import ExportMode, TaskCheckpoint
 from core.dto.subtitle_dto import SubtitleSegmentDTO, TranslationProgressDTO
 from core.dto.task_dto import TaskSummaryDTO
 from core.services.task_service import TaskService
@@ -227,5 +227,93 @@ def test_tasks_page_selects_translation_and_emits_edit_and_retranslate_requests(
     ]
     assert retranslate_requests == [(project.project_id, "segment-2")]
 
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_emits_retry_for_failed_project(tmp_path) -> None:
+    """失败项目应显示继续入口，并提交项目编号和原处理模式。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    project = Project(
+        project_id="project-retry",
+        source_video=tmp_path / "retry.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-retry",
+    )
+    project.mark_failed("模拟翻译失败")
+    projects.save(project)
+    failed = Task("task-retry", project.project_id, "translate_subtitles")
+    failed.mark_failed("模拟翻译失败")
+    tasks.save(failed)
+    page = TasksPage(
+        TaskService(project_repository=projects, task_repository=tasks)
+    )
+    emitted: list[tuple[str, str]] = []
+    page.retry_requested.connect(
+        lambda project_id, mode: emitted.append((project_id, mode))
+    )
+
+    page.refresh_history()
+    page.retry_button.click()
+    app.processEvents()
+
+    assert page.retry_button.isEnabled() is True
+    assert emitted == [(project.project_id, "full_pipeline")]
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_emits_reexport_with_selected_mode(tmp_path) -> None:
+    """完整译文项目应允许选择导出模式并请求重新导出。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    project = Project(
+        project_id="project-reexport",
+        source_video=tmp_path / "reexport.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-reexport",
+    )
+    project.mark_completed()
+    projects.save(project)
+    completed = Task("task-reexport", project.project_id, "export_video")
+    completed.mark_succeeded("导出完成", TaskCheckpoint.EXPORTED)
+    tasks.save(completed)
+    subtitles.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    page = TasksPage(
+        TaskService(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+        )
+    )
+    emitted: list[tuple[str, str]] = []
+    page.reexport_requested.connect(
+        lambda project_id, mode: emitted.append((project_id, mode))
+    )
+
+    page.refresh_history()
+    burn_in_index = page.export_mode_combo.findData(ExportMode.BURN_IN.value)
+    page.export_mode_combo.setCurrentIndex(burn_in_index)
+    page.reexport_button.click()
+    app.processEvents()
+
+    assert page.reexport_button.isEnabled() is True
+    assert emitted == [(project.project_id, ExportMode.BURN_IN.value)]
     page.deleteLater()
     app.processEvents()

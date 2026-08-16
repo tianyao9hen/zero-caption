@@ -10,6 +10,7 @@ from dataclasses import replace
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.domain.enums import ExportMode
 from core.dto.subtitle_dto import (
     SubtitleTranslationItemDTO,
     TranslationProgressDTO,
@@ -38,6 +40,8 @@ class TasksPage(QWidget):
     # 页面只发出“用户想创建任务”的意图，主窗口负责打开参数对话框并
     # 创建后台线程。这样页面不会承担主流程编排职责。
     create_requested = Signal()
+    retry_requested = Signal(str, str)
+    reexport_requested = Signal(str, str)
     save_translation_requested = Signal(str, str, str)
     retranslate_requested = Signal(str, str)
 
@@ -74,6 +78,9 @@ class TasksPage(QWidget):
         super().__init__()
         self.task_service = task_service
         self._subtitle_action_running = False
+        self._project_action_running = False
+        self._selected_history_value: VideoTaskHistoryDTO | None = None
+        self._has_complete_translation = False
 
         # 左侧区域沿用桌面任务工具常见的操作方式：创建入口固定在顶部，
         # 历史视频按最近更新时间排列，选择一项后在右侧查看详细状态。
@@ -131,6 +138,28 @@ class TasksPage(QWidget):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("总进度 %p%")
+
+        self.retry_button = QPushButton("从检查点继续")
+        self.retry_button.setObjectName("retryVideoTaskButton")
+        self.retry_button.setEnabled(False)
+        self.retry_button.clicked.connect(self._request_retry)
+        self.export_mode_combo = QComboBox()
+        self.export_mode_combo.setObjectName("projectExportModeCombo")
+        self.export_mode_combo.addItem(
+            "外挂字幕",
+            ExportMode.SOFT_SUBTITLE.value,
+        )
+        self.export_mode_combo.addItem("烧录字幕", ExportMode.BURN_IN.value)
+        self.export_mode_combo.setEnabled(False)
+        self.reexport_button = QPushButton("重新导出成品")
+        self.reexport_button.setObjectName("reexportProjectButton")
+        self.reexport_button.setEnabled(False)
+        self.reexport_button.clicked.connect(self._request_reexport)
+        project_actions = QHBoxLayout()
+        project_actions.addWidget(self.retry_button)
+        project_actions.addStretch(1)
+        project_actions.addWidget(self.export_mode_combo)
+        project_actions.addWidget(self.reexport_button)
 
         details_form = QFormLayout()
         details_form.addRow("源视频", self.source_video_label)
@@ -194,6 +223,7 @@ class TasksPage(QWidget):
         detail_layout = QVBoxLayout(detail_group)
         detail_layout.addLayout(details_form)
         detail_layout.addWidget(self.progress_bar)
+        detail_layout.addLayout(project_actions)
 
         translation_group = QGroupBox("字幕翻译结果与单句修订")
         translation_layout = QVBoxLayout(translation_group)
@@ -256,6 +286,9 @@ class TasksPage(QWidget):
                 selected_item = item
 
         if self.task_list.count() == 0:
+            self._selected_history_value = None
+            self._has_complete_translation = False
+            self._sync_project_actions()
             placeholder = QListWidgetItem("暂无视频任务\n点击上方按钮创建第一个任务")
             placeholder.setFlags(
                 placeholder.flags()
@@ -278,6 +311,16 @@ class TasksPage(QWidget):
         self.translation_count_label.setText("等待字幕翻译")
         self.subtitle_list.clear()
         self._clear_subtitle_editor()
+
+    def set_project_action_running(self, running: bool, message: str = "") -> None:
+        """切换视频级操作的忙碌状态，避免重复恢复或重复导出。"""
+
+        self._project_action_running = running
+        self.create_task_button.setEnabled(not running)
+        self.refresh_button.setEnabled(not running)
+        if message:
+            self.message_label.setText(message)
+        self._sync_project_actions()
 
     def update_summary(self, summary: TaskSummaryDTO) -> None:
         """用最新任务摘要刷新详情，并更新对应视频的列表条目。"""
@@ -359,6 +402,10 @@ class TasksPage(QWidget):
         if not isinstance(value, VideoTaskHistoryDTO):
             return
 
+        self._selected_history_value = value
+        self._has_complete_translation = False
+        self._select_export_mode(value.export_mode)
+
         self.source_video_label.setText(str(value.source_video))
         self.project_id_label.setText(value.project_id)
         self.task_id_label.setText(value.task_id or "-")
@@ -375,6 +422,7 @@ class TasksPage(QWidget):
         self.workspace_label.setText(str(value.workspace_dir))
         self.progress_bar.setValue(value.progress)
         self._load_subtitle_translations(value.project_id)
+        self._sync_project_actions()
 
     def _load_subtitle_translations(
         self,
@@ -386,6 +434,7 @@ class TasksPage(QWidget):
         try:
             items = self.task_service.list_subtitle_translations(project_id)
         except (RuntimeError, ValueError) as exc:
+            self._has_complete_translation = False
             self.subtitle_list.clear()
             self.translation_count_label.setText(f"字幕暂不可用：{exc}")
             self._clear_subtitle_editor()
@@ -405,13 +454,58 @@ class TasksPage(QWidget):
                 selected_item = item
 
         if not items:
+            self._has_complete_translation = False
             self.translation_count_label.setText("这个项目尚未生成原文字幕")
             self._clear_subtitle_editor()
             return
         self.translation_count_label.setText(
             f"已有译文 {translated_count}/{len(items)} 条"
         )
+        self._has_complete_translation = translated_count == len(items)
         self.subtitle_list.setCurrentItem(selected_item or self.subtitle_list.item(0))
+        self._sync_project_actions()
+
+    def _request_retry(self) -> None:
+        """把当前失败项目的继续处理意图发给主窗口。"""
+
+        value = self._selected_history_value
+        if value is None:
+            return
+        self.retry_requested.emit(value.project_id, value.processing_mode)
+
+    def _request_reexport(self) -> None:
+        """把当前项目和用户选择的导出模式发给主窗口。"""
+
+        value = self._selected_history_value
+        mode_value = self.export_mode_combo.currentData()
+        if value is None or not isinstance(mode_value, str):
+            return
+        self.reexport_requested.emit(value.project_id, mode_value)
+
+    def _select_export_mode(self, mode_value: str) -> None:
+        """让导出模式控件显示项目上次保存的选择。"""
+
+        for index in range(self.export_mode_combo.count()):
+            if self.export_mode_combo.itemData(index) == mode_value:
+                self.export_mode_combo.setCurrentIndex(index)
+                return
+
+    def _sync_project_actions(self) -> None:
+        """根据当前项目状态启用恢复与重新导出操作。"""
+
+        value = self._selected_history_value
+        available = value is not None and not self._project_action_running
+        retryable = available and (
+            value.project_status == "failed" or value.task_status == "pending"
+        )
+        exportable = (
+            available
+            and value.processing_mode == "full_pipeline"
+            and self._has_complete_translation
+        )
+        self.retry_button.setEnabled(bool(retryable))
+        self.export_mode_combo.setEnabled(bool(exportable))
+        self.reexport_button.setEnabled(bool(exportable))
 
     def _show_subtitle_item(
         self,
@@ -591,8 +685,10 @@ class TasksPage(QWidget):
             ),
         )
         item.setData(Qt.ItemDataRole.UserRole, updated)
+        self._selected_history_value = updated
         self._update_history_item_text(item, updated)
         self.task_list.setCurrentItem(item)
+        self._sync_project_actions()
 
     def _find_project_item(self, project_id: str) -> QListWidgetItem | None:
         """按项目编号查找列表项，避免依赖会随排序变化的行号。"""
