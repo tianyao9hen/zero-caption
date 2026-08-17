@@ -5,6 +5,7 @@ from pathlib import Path
 from threading import Event, Lock
 from time import monotonic
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.container import AppContainer
@@ -160,13 +161,12 @@ def test_main_window_refreshes_task_service_after_translation_settings_save(
     window = container.create_main_window()
     original_service = window.task_service
 
-    # act：通过真实页面按钮走完“信号 -> 主窗口 -> 容器 -> 重装配”路径。
+    # act：连续编辑后等待自动保存，走完“页面 -> 主窗口 -> 容器 -> 重装配”路径。
     window.settings_page.base_url_field.setText("https://llm.example/v1")
     window.settings_page.model_field.setText("caption-model")
     window.settings_page.api_key_field.setText("configured-secret")
     window.settings_page.system_prompt_field.setPlainText("保存后的新系统提示词")
-    window.settings_page.save_button.click()
-    app.processEvents()
+    QTest.qWait(650)
 
     # assert：配置已交给持久化入口，窗口和容器同时切换到新配置和新服务。
     assert len(saved_settings) == 1

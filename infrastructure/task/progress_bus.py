@@ -13,6 +13,7 @@ from queue import Empty, Queue
 from core.domain.entities import Task
 from core.dto.subtitle_dto import TranslationProgressDTO
 from core.dto.task_dto import TaskSummaryDTO
+from core.services.task_progress import overall_video_progress
 
 
 ProgressEvent = TaskSummaryDTO | TranslationProgressDTO
@@ -32,7 +33,11 @@ class ProgressBus:
                 task_id=task.task_id,
                 task_type=task.task_type,
                 status=task.status.value,
-                progress=task.progress,
+                progress=overall_video_progress(
+                    task_type=task.task_type,
+                    task_status=task.status.value,
+                    task_progress=task.progress,
+                ),
                 current_step=task.current_step,
                 message=task.message,
                 project_id=task.project_id,

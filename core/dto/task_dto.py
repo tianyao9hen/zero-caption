@@ -37,6 +37,7 @@ class VideoTaskHistoryDTO:
     """
 
     project_id: str
+    display_name: str
     source_video: Path
     workspace_dir: Path
     output_path: Path | None

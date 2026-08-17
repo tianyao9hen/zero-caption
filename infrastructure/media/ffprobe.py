@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,11 @@ class FFprobeAdapter:
             capture_output=True,
             text=True,
             check=False,
+            # `ffprobe` 是控制台程序；桌面安装版在 Windows 上启动它时
+            # 使用无窗口标志，避免探测视频时闪出黑色终端窗口。
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            ),
         )
         if completed.returncode != 0:
             raise FFprobeError(

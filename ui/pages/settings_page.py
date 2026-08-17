@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -67,17 +67,21 @@ class SettingsPage(QWidget):
         content_layout.addWidget(self._build_model_test_group())
         content_layout.addWidget(self._build_request_group(settings.engine.translation))
 
-        action_layout = QHBoxLayout()
+        # 引擎设置使用短延迟自动保存。文本输入会连续触发很多次变化，
+        # 单次计时器只在用户停止编辑后提交最后一份完整配置，避免每输入
+        # 一个字符就重写配置文件和重新装配服务。
+        self._applying_saved_settings = False
+        self._auto_save_timer = QTimer(self)
+        self._auto_save_timer.setSingleShot(True)
+        self._auto_save_timer.setInterval(500)
+        self._auto_save_timer.timeout.connect(self._emit_save_requested)
+        self._connect_auto_save_signals()
+
         self.feedback_label = QLabel("")
         self.feedback_label.setMinimumHeight(24)
         self.feedback_label.setWordWrap(True)
-        self.save_button = QPushButton("保存引擎设置")
-        self.save_button.setObjectName("saveEngineSettingsButton")
-        self.save_button.setMinimumWidth(150)
-        self.save_button.clicked.connect(self._emit_save_requested)
-        action_layout.addWidget(self.feedback_label, 1)
-        action_layout.addWidget(self.save_button)
-        content_layout.addLayout(action_layout)
+        self.feedback_label.setText("修改引擎设置后会自动保存。")
+        content_layout.addWidget(self.feedback_label)
         content_layout.addStretch(1)
 
         # 设置项在较小窗口中可能超过可用高度，滚动区域可以保持表单不互相挤压。
@@ -143,21 +147,27 @@ class SettingsPage(QWidget):
     def apply_saved_engine_settings(self, settings: EngineSettings) -> None:
         """保存成功后同步表单，确保展示的是实际生效配置。"""
 
-        self._select_combo_data(self.asr_model_combo, settings.asr.model_name)
-        self._select_combo_data(self.asr_device_combo, settings.asr.device)
-        self._select_combo_data(self.asr_compute_combo, settings.asr.compute_type)
-        self.cpu_fallback_check.setChecked(settings.asr.allow_cpu_fallback)
-        self._sync_asr_compute_selection()
-        self._select_provider(settings.translation.provider)
-        self.base_url_field.setText(settings.translation.base_url)
-        self.model_field.setText(settings.translation.model)
-        self.api_key_field.setText(settings.translation.api_key)
-        self.api_key_env = settings.translation.api_key_env
-        self.system_prompt_field.setPlainText(settings.translation.system_prompt)
-        self.timeout_spin.setValue(settings.translation.timeout_seconds)
-        self.retry_spin.setValue(settings.translation.max_retries)
-        self.batch_segments_spin.setValue(settings.translation.max_batch_segments)
-        self.batch_characters_spin.setValue(settings.translation.max_batch_characters)
+        # 主窗口保存成功后会把实际配置写回控件。写回期间暂时忽略控件信号，
+        # 否则程序自己的同步动作会再次启动计时器，形成重复保存循环。
+        self._applying_saved_settings = True
+        try:
+            self._select_combo_data(self.asr_model_combo, settings.asr.model_name)
+            self._select_combo_data(self.asr_device_combo, settings.asr.device)
+            self._select_combo_data(self.asr_compute_combo, settings.asr.compute_type)
+            self.cpu_fallback_check.setChecked(settings.asr.allow_cpu_fallback)
+            self._sync_asr_compute_selection()
+            self._select_provider(settings.translation.provider)
+            self.base_url_field.setText(settings.translation.base_url)
+            self.model_field.setText(settings.translation.model)
+            self.api_key_field.setText(settings.translation.api_key)
+            self.api_key_env = settings.translation.api_key_env
+            self.system_prompt_field.setPlainText(settings.translation.system_prompt)
+            self.timeout_spin.setValue(settings.translation.timeout_seconds)
+            self.retry_spin.setValue(settings.translation.max_retries)
+            self.batch_segments_spin.setValue(settings.translation.max_batch_segments)
+            self.batch_characters_spin.setValue(settings.translation.max_batch_characters)
+        finally:
+            self._applying_saved_settings = False
 
     def show_save_result(self, success: bool, message: str) -> None:
         """在表单底部显示保存结果，不弹出会打断操作的模态窗口。"""
@@ -482,7 +492,7 @@ class SettingsPage(QWidget):
         combo.setCurrentIndex(index if index >= 0 else 0)
 
     def _apply_asr_recommendation(self) -> None:
-        """把硬件探测给出的推荐组合填入表单，等待用户保存。"""
+        """把硬件探测给出的推荐组合填入表单并等待自动保存。"""
 
         hardware = self.asr_hardware_info
         self._select_combo_data(self.asr_model_combo, hardware.recommended_model)
@@ -493,7 +503,7 @@ class SettingsPage(QWidget):
         )
         self.cpu_fallback_check.setChecked(True)
         self.feedback_label.setStyleSheet("color: #315a8a;")
-        self.feedback_label.setText("已应用推荐值，点击“保存引擎设置”后生效。")
+        self.feedback_label.setText("已应用推荐值，正在等待自动保存。")
 
     def _sync_asr_compute_selection(self) -> None:
         """CPU 模式下把不受支持的半精度组合规整为 `int8`。"""
@@ -504,8 +514,42 @@ class SettingsPage(QWidget):
         ):
             self._select_combo_data(self.asr_compute_combo, "int8")
 
+    def _connect_auto_save_signals(self) -> None:
+        """连接所有引擎编辑控件，在输入停止后统一自动保存。"""
+
+        for combo in (
+            self.asr_model_combo,
+            self.asr_device_combo,
+            self.asr_compute_combo,
+            self.provider_combo,
+        ):
+            combo.currentIndexChanged.connect(self._schedule_auto_save)
+        self.cpu_fallback_check.toggled.connect(self._schedule_auto_save)
+        for field in (
+            self.base_url_field,
+            self.model_field,
+            self.api_key_field,
+        ):
+            field.textChanged.connect(self._schedule_auto_save)
+        self.system_prompt_field.textChanged.connect(self._schedule_auto_save)
+        for spin in (
+            self.timeout_spin,
+            self.retry_spin,
+            self.batch_characters_spin,
+        ):
+            spin.valueChanged.connect(self._schedule_auto_save)
+
+    def _schedule_auto_save(self, *_args: object) -> None:
+        """重启自动保存计时器，只提交用户最后一次编辑后的配置。"""
+
+        if self._applying_saved_settings:
+            return
+        self.feedback_label.setStyleSheet("color: #315a8a;")
+        self.feedback_label.setText("设置已修改，将在输入完成后自动保存……")
+        self._auto_save_timer.start()
+
     def _emit_save_requested(self) -> None:
-        """清除旧反馈，并把当前表单值作为保存请求发给主窗口。"""
+        """把停止编辑后的当前表单值作为保存请求发给主窗口。"""
 
         self.feedback_label.clear()
         self.save_requested.emit(self.engine_settings())

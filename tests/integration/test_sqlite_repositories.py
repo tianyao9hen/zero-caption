@@ -96,6 +96,58 @@ def test_sqlite_repositories_round_trip_domain_data(tmp_path) -> None:
     assert restored_export.mode is ExportMode.SOFT_SUBTITLE
 
 
+def test_sqlite_project_delete_removes_all_dependent_records(tmp_path) -> None:
+    """删除项目时应在一个事务中同步移除任务、字幕和导出历史。"""
+
+    database = SQLiteDatabase(tmp_path / "delete.sqlite3")
+    projects = SQLiteProjectRepository(database)
+    tasks = SQLiteTaskRepository(database)
+    subtitles = SQLiteSubtitleRepository(database)
+    exports = SQLiteExportRecordRepository(database)
+    project = Project(
+        project_id="project-delete",
+        source_video=tmp_path / "source.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "projects" / "project-delete",
+    )
+    task = Task("task-delete", project.project_id, "translate_subtitles")
+    segment = SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")
+    record = ExportRecordDTO(
+        project_id=project.project_id,
+        source_video=project.source_video,
+        subtitle_path=tmp_path / "translated.srt",
+        output_path=tmp_path / "output.mp4",
+        mode=ExportMode.SOFT_SUBTITLE,
+    )
+    projects.save(project)
+    tasks.save(task)
+    subtitles.save_source_segments(project.project_id, [segment])
+    exports.save(record)
+
+    deleted = projects.delete(project.project_id)
+
+    assert deleted is True
+    with database.connection() as connection:
+        counts = {
+            table: connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in (
+                "projects",
+                "tasks",
+                "subtitle_segments",
+                "export_records",
+            )
+        }
+    assert counts == {
+        "projects": 0,
+        "tasks": 0,
+        "subtitle_segments": 0,
+        "export_records": 0,
+    }
+
+
 def test_sqlite_database_migrates_legacy_project_request_columns(tmp_path) -> None:
     """旧版项目表应自动补充恢复请求列，不要求用户删除历史数据库。"""
 

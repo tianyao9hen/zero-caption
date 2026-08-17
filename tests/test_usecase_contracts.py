@@ -522,8 +522,8 @@ def test_task_service_uses_latest_task_snapshot_for_summary(tmp_path):
         )
     )
 
-    # assert：状态摘要应来自最近一次任务结果，而不是旧的手工字符串。
+    # assert：摘要使用整条视频流程进度，导入成功只占 5%，不能提前显示完成。
     summary = service.summary()
     assert result.task.task_type in summary
-    assert "100%" in summary
+    assert "5%" in summary
     assert "项目已导入" in summary

@@ -58,6 +58,7 @@ def test_translator_sends_only_text_and_language_context(monkeypatch) -> None:
     # assert：检查端点、语言和字幕正文；媒体路径从未进入请求结构。
     assert requests[0][0] == "https://translation.example/v1/chat/completions"
     assert requests[0][1]["Authorization"] == "Bearer secret-value"
+    assert requests[0][2]["enable_thinking"] is False
     assert requests[0][2]["messages"][0]["content"] == "自定义字幕系统提示词"  # type: ignore[index]
     user_content = requests[0][2]["messages"][1]["content"]  # type: ignore[index]
     request_data = json.loads(user_content)
@@ -174,6 +175,7 @@ def test_model_test_uses_current_system_and_user_prompts(monkeypatch) -> None:
     result = translator.test_prompt("请回答连接是否正常")
 
     assert result == "测试成功"
+    assert requests[0]["enable_thinking"] is False
     assert requests[0]["messages"] == [
         {"role": "system", "content": "只输出测试结果"},
         {"role": "user", "content": "请回答连接是否正常"},

@@ -5,7 +5,7 @@
 ; 使用空目录或已属于 Zero Caption 的目录，因此卸载时可以安全清理其中的残留文件。
 
 #define MyAppName "Zero Caption"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.1"
 #define MyAppPublisher "Zero Caption"
 #define MyAppExeName "ZeroCaption.exe"
 #define MyAppDataDirectoryName "ZeroCaption"

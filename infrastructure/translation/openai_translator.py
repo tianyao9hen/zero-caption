@@ -144,6 +144,9 @@ class OpenAICompatibleTranslator:
             {
                 "model": self.model,
                 "temperature": 0,
+                # OpenAI 兼容服务通常使用这个扩展字段关闭思考模式。
+                # 翻译任务只需要短文本结果，关闭思考可以显著减少等待时间。
+                "enable_thinking": False,
                 "messages": [
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": prompt},
@@ -228,6 +231,9 @@ class OpenAICompatibleTranslator:
         return {
             "model": self.model,
             "temperature": 0,
+            # 正式翻译与模型测试保持相同策略，避免后台逐句请求意外进入
+            # 长时间思考模式，拖慢整条字幕处理链路。
+            "enable_thinking": False,
             "messages": [
                 {"role": "system", "content": self.system_prompt},
                 {

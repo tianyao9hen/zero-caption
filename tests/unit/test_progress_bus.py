@@ -43,3 +43,16 @@ def test_progress_bus_keeps_translation_event_in_publish_order() -> None:
     bus.publish_translation(progress)
 
     assert bus.drain() == [progress]
+
+
+def test_progress_bus_does_not_publish_transcription_success_as_total_100() -> None:
+    """完整流程的识别任务成功只代表到达 40%，不能冒充视频处理完成。"""
+
+    bus = ProgressBus()
+    task = Task("task-transcribed", "project-1", "transcribe_video")
+    task.mark_succeeded("识别完成", TaskCheckpoint.TRANSCRIBED)
+
+    bus.publish(task)
+
+    summary = bus.drain()[0]
+    assert summary.progress == 40

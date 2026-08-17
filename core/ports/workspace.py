@@ -11,10 +11,28 @@ from typing import Protocol
 
 
 class ProjectWorkspace(Protocol):
-    """创建项目级标准目录结构的能力。"""
+    """创建和安全删除项目级标准目录结构的能力。"""
+
+    def create_project_structure(
+        self,
+        project_id: str,
+        directory_name: str,
+    ) -> Path:
+        """使用指定目录名创建全新的项目目录，目录已存在时报告冲突。"""
+
+        ...
 
     def ensure_project_structure(self, project_id: str) -> Path:
         """创建项目目录和标准子目录，并返回项目根目录。"""
+
+        ...
+
+    def delete_project_structure(
+        self,
+        project_id: str,
+        project_dir: Path,
+    ) -> None:
+        """校验并递归删除指定项目目录，不影响源视频或工作区其他项目。"""
 
         ...
 

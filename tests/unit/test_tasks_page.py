@@ -1,6 +1,7 @@
 """任务页面逐句翻译展示的单元测试。"""
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QMessageBox, QSplitter
 
 from core.domain.entities import Project, Task
 from core.domain.enums import ExportMode, TaskCheckpoint
@@ -36,6 +37,16 @@ def test_tasks_page_appends_translation_progress_in_real_time(monkeypatch) -> No
     assert page.subtitle_list.count() == 1
     assert "原文：hello" in page.subtitle_list.item(0).text()
     assert "译文：你好" in page.subtitle_list.item(0).text()
+    translation_splitter = page.findChild(
+        QSplitter,
+        "subtitleTranslationSplitter",
+    )
+    assert translation_splitter is not None
+    assert translation_splitter.orientation() is Qt.Orientation.Horizontal
+    assert page.subtitle_list.minimumHeight() >= 280
+    assert page.subtitle_translation_editor.minimumHeight() >= 150
+    assert page.message_label.maximumHeight() <= 64
+    assert page.error_label.maximumHeight() <= 88
     page.deleteLater()
     app.processEvents()
 
@@ -96,6 +107,36 @@ def test_tasks_page_groups_persisted_steps_by_video_project(tmp_path) -> None:
     assert page.task_type_label.text() == "逐句翻译"
     assert page.progress_bar.value() == 80
 
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_displays_random_suffix_from_project_directory(tmp_path) -> None:
+    """新项目列表名称应展示目录中的两位后缀，方便区分同一视频的任务。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    project = Project(
+        project_id="project-readable-name",
+        source_video=tmp_path / "lesson.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "data" / "projects" / "lesson-AB",
+    )
+    project.mark_processing()
+    projects.save(project)
+    task = Task("task-readable-name", project.project_id, "transcribe_video")
+    task.start("开始识别")
+    tasks.save(task)
+    page = TasksPage(
+        TaskService(project_repository=projects, task_repository=tasks)
+    )
+
+    page.refresh_history()
+    app.processEvents()
+
+    assert page.task_list.item(0).text().splitlines()[0] == "lesson-AB.mp4"
     page.deleteLater()
     app.processEvents()
 
@@ -228,8 +269,54 @@ def test_tasks_page_prefers_completed_step_over_stale_processing_project(
     app.processEvents()
 
     summary = page.task_list.item(0).text()
-    assert "已完成 · 100%" in summary
+    assert "已完成 · 40%" in summary
     assert "处理中 · 100%" not in summary
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_allows_deleting_running_project(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """运行中项目也应启用删除入口，并提交项目编号与项目目录。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    project = Project(
+        project_id="project-running-delete",
+        source_video=tmp_path / "running.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-running-delete",
+    )
+    project.mark_processing()
+    projects.save(project)
+    running = Task("task-running-delete", project.project_id, "translate_subtitles")
+    running.start("正在翻译")
+    tasks.save(running)
+    page = TasksPage(
+        TaskService(project_repository=projects, task_repository=tasks)
+    )
+    emitted: list[tuple[str, str]] = []
+    page.delete_requested.connect(
+        lambda project_id, workspace_dir: emitted.append(
+            (project_id, workspace_dir)
+        )
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    page.refresh_history()
+    assert page.delete_button.isEnabled() is True
+    page.delete_button.click()
+    app.processEvents()
+
+    assert emitted == [(project.project_id, str(project.workspace_dir))]
     page.deleteLater()
     app.processEvents()
 

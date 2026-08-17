@@ -19,6 +19,7 @@ class WorkspaceManager:
 
     _marker_name = ".zero-caption-workspace"
     _marker_content = "zero-caption-workspace-v1\n"
+    _project_marker_name = ".zero-caption-project"
     _project_subdirs = (
         "source",
         "temp",
@@ -93,6 +94,112 @@ class WorkspaceManager:
             (project_dir / dirname).mkdir(parents=True, exist_ok=True)
 
         return project_dir
+
+    def create_project_structure(
+        self,
+        project_id: str,
+        directory_name: str,
+    ) -> Path:
+        """以用户可读名称创建一个全新的项目目录。
+
+        参数：
+            project_id：数据库使用的稳定项目编号。
+            directory_name：由视频名和随机后缀组成的目录名。
+
+        返回：
+            新创建的项目根目录。
+
+        副作用：
+            会创建项目目录、身份标记和标准子目录。若同名目录已经存在，
+            `mkdir` 会抛出 `FileExistsError`，调用方可以换一个后缀重试。
+        """
+
+        if not project_id:
+            raise ValueError("项目编号不能为空。")
+        if (
+            not directory_name
+            or Path(directory_name).name != directory_name
+            or directory_name in {".", ".."}
+        ):
+            raise ValueError("项目目录名包含无效的路径字符。")
+
+        self.ensure_structure()
+        project_dir = self.projects_dir / directory_name
+
+        # 第一步：用独占创建检测同名目录，避免两个并发任务共用缓存和字幕。
+        project_dir.mkdir(exist_ok=False)
+        try:
+            # 第二步：身份标记把可读目录名和内部项目编号关联起来。
+            # 删除任务时会核对这个标记，避免误删另一个项目的同名目录。
+            marker = project_dir / self._project_marker_name
+            marker.write_text(f"{project_id}\n", encoding="utf-8")
+
+            # 第三步：只有身份标记写入成功后才创建标准子目录。
+            for dirname in self._project_subdirs:
+                (project_dir / dirname).mkdir()
+        except Exception:
+            # 目录是本方法刚刚独占创建的；初始化失败时回滚半成品，
+            # 后续重试才不会把它误判为一个有效的既有项目。
+            shutil.rmtree(project_dir)
+            raise
+
+        return project_dir
+
+    def delete_project_structure(
+        self,
+        project_id: str,
+        project_dir: Path,
+    ) -> None:
+        """只删除工作区中身份信息与项目编号匹配的项目目录。
+
+        参数：
+            project_id：数据库记录中的项目编号。
+            project_dir：项目创建时持久化的实际目录。
+
+        副作用：
+            目标存在且通过边界校验后会递归删除。源视频通常位于工作区外，
+            不在这个方法的删除范围内。
+        """
+
+        if not project_id or Path(project_id).name != project_id:
+            raise ValueError("项目编号包含无效的路径字符，拒绝删除目录。")
+
+        projects_root = self.projects_dir
+        raw_target = Path(project_dir).expanduser()
+        target = raw_target.resolve()
+        resolved_projects_root = projects_root.resolve()
+        if target.parent != resolved_projects_root:
+            raise ValueError("项目目录与工作区记录不匹配，拒绝自动删除。")
+
+        # 目录联接和符号链接可能把看似位于工作区内的路径指向其他磁盘位置。
+        # 删除前同时检查项目根和目标本身，避免递归操作越过工作区边界。
+        is_junction = getattr(raw_target, "is_junction", lambda: False)
+        root_is_junction = getattr(projects_root, "is_junction", lambda: False)
+        if (
+            projects_root.is_symlink()
+            or root_is_junction()
+            or raw_target.is_symlink()
+            or is_junction()
+        ):
+            raise ValueError("项目目录使用了链接或目录联接，拒绝自动删除。")
+
+        if not raw_target.exists():
+            return
+        if not raw_target.is_dir():
+            raise ValueError("项目工作路径不是普通目录，拒绝自动删除。")
+
+        # 新项目使用可读目录名，因此通过目录内标记核对项目编号。
+        # 旧版本没有标记，仍要求目录名与项目编号完全相同，保持兼容和安全。
+        marker = raw_target / self._project_marker_name
+        if marker.exists():
+            if (
+                not marker.is_file()
+                or marker.read_text(encoding="utf-8") != f"{project_id}\n"
+            ):
+                raise ValueError("项目目录身份标记不匹配，拒绝自动删除。")
+        elif raw_target.name != project_id:
+            raise ValueError("项目目录与工作区记录不匹配，拒绝自动删除。")
+        shutil.rmtree(raw_target)
 
     def delete_managed_workspace(self, current_root: str | Path) -> None:
         """永久删除一个已经停用且可安全识别的工作区。

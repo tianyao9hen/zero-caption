@@ -84,6 +84,10 @@ class MainWindow(QMainWindow):
         # 共享识别引擎实例。字典保留线程对象，防止 Qt 在线程结束前回收它。
         self._pipeline_runners: dict[int, PipelineRunner] = {}
         self._pipeline_project_ids: dict[int, str | None] = {}
+        self._pipeline_task_services: dict[int, TaskService] = {}
+        # 运行中的项目可能暂时占用音频或视频文件。第一次删除会立即尝试，
+        # 同时保留项目目录，在线程退出后再次执行幂等清理，避免残留文件夹。
+        self._pending_task_deletions: dict[str, str] = {}
         self._max_pipeline_concurrency = settings.task.max_concurrency
         self._translation_test_runner: TranslationTestRunner | None = None
         self._subtitle_revision_runner: SubtitleRevisionRunner | None = None
@@ -132,6 +136,9 @@ class MainWindow(QMainWindow):
             self._handle_translation_test_requested
         )
         self.tasks_page.create_requested.connect(self.open_import_dialog)
+        self.tasks_page.delete_requested.connect(
+            self._handle_delete_requested
+        )
         self.tasks_page.retry_requested.connect(
             self._handle_retry_requested
         )
@@ -208,6 +215,7 @@ class MainWindow(QMainWindow):
             operation=lambda: task_service.process_video(request),
             success_handler=self._handle_pipeline_success,
             message="正在创建并处理视频任务……",
+            task_service=task_service,
         )
 
     def _handle_retry_requested(
@@ -235,6 +243,7 @@ class MainWindow(QMainWindow):
             success_handler=self._handle_pipeline_success,
             message="正在从已有检查点继续处理……",
             project_id=project_id,
+            task_service=task_service,
         )
 
     def _handle_reexport_requested(
@@ -256,7 +265,44 @@ class MainWindow(QMainWindow):
             success_handler=self._handle_reexport_success,
             message="正在使用当前字幕重新导出成品……",
             project_id=project_id,
+            task_service=task_service,
         )
+
+    def _handle_delete_requested(
+        self,
+        project_id: str,
+        workspace_dir: str,
+    ) -> None:
+        """删除任意状态的任务，并为运行中项目登记退出后收尾。"""
+
+        active = project_id in self._active_pipeline_project_ids()
+        revision_project_id = self._active_revision_project_id()
+        needs_final_cleanup = active or revision_project_id == project_id
+        if needs_final_cleanup:
+            self._pending_task_deletions[project_id] = workspace_dir
+
+        try:
+            self.task_service.delete_video_task(project_id, workspace_dir)
+        except (OSError, RuntimeError, ValueError) as exc:
+            if needs_final_cleanup:
+                # Windows 可能暂时锁住正在读写的音视频文件。保留待删除记录，
+                # 后台线程结束时会自动重试，不要求用户再次点击按钮。
+                message = f"任务正在退出，项目将在后台操作结束后删除：{exc}"
+                self.status_widget.show_message(message)
+                self.tasks_page.message_label.setText(message)
+                return
+            self.logger.exception("删除视频任务失败")
+            QMessageBox.warning(self, "删除失败", str(exc))
+            self.status_widget.show_message(f"删除任务失败：{exc}")
+            return
+
+        self.tasks_page.refresh_history()
+        if needs_final_cleanup:
+            message = "任务已从列表移除，后台操作退出后会再次检查项目目录。"
+        else:
+            self._pending_task_deletions.pop(project_id, None)
+            message = "任务记录和项目目录已删除。"
+        self.status_widget.show_message(message)
 
     def _start_project_operation(
         self,
@@ -264,6 +310,7 @@ class MainWindow(QMainWindow):
         success_handler: Callable[[object], None],
         message: str,
         project_id: str | None = None,
+        task_service: TaskService | None = None,
     ) -> bool:
         """启动一个视频级后台操作，并返回是否成功占用普通并发槽位。"""
 
@@ -285,13 +332,20 @@ class MainWindow(QMainWindow):
         self.navigation.set_current_page(1)
         runner = PipelineRunner(operation)
         runner.succeeded.connect(success_handler)
-        runner.failed.connect(self._handle_pipeline_failure)
+        runner.failed.connect(
+            lambda failure, runner=runner: self._handle_pipeline_failure(
+                failure,
+                runner,
+            )
+        )
         runner.finished.connect(
             lambda runner=runner: self._release_pipeline_runner(runner)
         )
         runner_id = id(runner)
         self._pipeline_runners[runner_id] = runner
         self._pipeline_project_ids[runner_id] = project_id
+        if task_service is not None:
+            self._pipeline_task_services[runner_id] = task_service
         self._sync_pipeline_capacity(message)
         runner.start()
         return True
@@ -309,6 +363,11 @@ class MainWindow(QMainWindow):
     def _handle_pipeline_success(self, result: ProcessVideoResult) -> None:
         """处理后台线程成功信号，刷新项目页并展示本次主要产物。"""
 
+        project_id = result.project.project.project_id
+        if project_id in self._pending_task_deletions:
+            self.status_widget.show_message("后台任务已退出，正在完成项目删除。")
+            return
+
         self.projects_page.show_result(result)
         self.tasks_page.refresh_history()
         self.navigation.set_current_page(1)
@@ -320,8 +379,24 @@ class MainWindow(QMainWindow):
         subtitle_path = result.subtitle_path
         self.status_widget.show_message(f"原文字幕生成完成：{subtitle_path}")
 
-    def _handle_pipeline_failure(self, message: str) -> None:
+    def _handle_pipeline_failure(
+        self,
+        message: str,
+        runner: PipelineRunner | None = None,
+    ) -> None:
         """处理后台线程失败信号，并把错误展示给用户。"""
+
+        project_id = None
+        if runner is not None:
+            runner_id = id(runner)
+            project_id = self._pipeline_project_ids.get(runner_id)
+            if not project_id:
+                service = self._pipeline_task_services.get(runner_id)
+                project_id = service.current_project_id() if service else None
+        if project_id and project_id in self._pending_task_deletions:
+            self.tasks_page.refresh_history()
+            self.status_widget.show_message("后台任务已退出，正在完成项目删除。")
+            return
 
         self.tasks_page.refresh_history()
         self.status_widget.show_message(f"处理失败：{message}")
@@ -329,6 +404,10 @@ class MainWindow(QMainWindow):
 
     def _handle_reexport_success(self, result: ExportVideoResult) -> None:
         """刷新项目历史，并展示重新导出的最新文件路径。"""
+
+        if result.project.project_id in self._pending_task_deletions:
+            self.status_widget.show_message("后台导出已退出，正在完成项目删除。")
+            return
 
         self.tasks_page.refresh_history()
         output_path = result.export_record.output_path
@@ -341,9 +420,11 @@ class MainWindow(QMainWindow):
         if stored_runner is None:
             return
         self._pipeline_project_ids.pop(id(runner), None)
+        self._pipeline_task_services.pop(id(runner), None)
         stored_runner.deleteLater()
         self._sync_pipeline_capacity()
         self.tasks_page.refresh_history()
+        self._flush_pending_task_deletions()
 
     def _has_pipeline_capacity(self) -> bool:
         """判断当前是否还能提交一个视频级后台流程。"""
@@ -352,6 +433,15 @@ class MainWindow(QMainWindow):
 
     def _active_pipeline_project_ids(self) -> set[str]:
         """返回正在恢复或重新导出的已有项目编号集合。"""
+
+        # 新建流程启动时尚未生成项目编号。每个后台线程持有独立服务实例，
+        # 创建项目用例结束后即可从该实例读取准确编号，不需要按事件顺序猜测。
+        for runner_id, service in list(self._pipeline_task_services.items()):
+            if self._pipeline_project_ids.get(runner_id):
+                continue
+            project_id = service.current_project_id()
+            if project_id:
+                self._pipeline_project_ids[runner_id] = project_id
 
         return {
             project_id
@@ -396,7 +486,7 @@ class MainWindow(QMainWindow):
         self.tasks_page.set_task_service(task_service)
         self._sync_pipeline_capacity()
         self.settings_page.apply_saved_engine_settings(updated_settings.engine)
-        message = "引擎设置已保存，后续任务将使用新配置。"
+        message = "引擎设置已自动保存，后续任务将使用新配置。"
         self.settings_page.show_save_result(True, message)
         self.status_widget.show_message(message)
 
@@ -557,7 +647,7 @@ class MainWindow(QMainWindow):
 
         if not self.settings.engine.translation.is_configured():
             self.tasks_page.show_subtitle_update_error(
-                "重新翻译前，请先在设置页保存可用的大模型配置。"
+                "重新翻译前，请先在设置页填写可用的大模型配置。"
             )
             return
         self._start_subtitle_revision(
@@ -611,6 +701,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         """刷新持久化任务和选中字幕，并提示成品视频不会自动更新。"""
 
+        if result.project_id in self._pending_task_deletions:
+            self.status_widget.show_message("字幕操作已退出，正在完成项目删除。")
+            return
+
         self.tasks_page.refresh_history(select_project_id=result.project_id)
         message = (
             f"第 {result.item.current_index} 条译文已更新："
@@ -624,6 +718,11 @@ class MainWindow(QMainWindow):
     def _handle_subtitle_revision_failure(self, message: str) -> None:
         """在任务页保留当前编辑文本并展示后台修订错误。"""
 
+        project_id = self._active_revision_project_id()
+        if project_id and project_id in self._pending_task_deletions:
+            self.status_widget.show_message("字幕操作已退出，正在完成项目删除。")
+            return
+
         self.tasks_page.show_subtitle_update_error(f"字幕更新失败：{message}")
         self.status_widget.show_message("字幕更新失败。")
 
@@ -636,6 +735,39 @@ class MainWindow(QMainWindow):
         ):
             self._subtitle_revision_runner.deleteLater()
             self._subtitle_revision_runner = None
+            self._flush_pending_task_deletions()
+
+    def _active_revision_project_id(self) -> str | None:
+        """返回当前单句修订线程关联的项目编号。"""
+
+        runner = self._subtitle_revision_runner
+        if runner is None or not runner.isRunning():
+            return None
+        return runner.request.project_id
+
+    def _flush_pending_task_deletions(self) -> None:
+        """在线程退出后重试项目删除，清理由文件锁造成的残留。"""
+
+        active_project_ids = self._active_pipeline_project_ids()
+        revision_project_id = self._active_revision_project_id()
+        removed_any = False
+        for project_id, workspace_dir in list(
+            self._pending_task_deletions.items()
+        ):
+            if project_id in active_project_ids or project_id == revision_project_id:
+                continue
+            try:
+                self.task_service.delete_video_task(project_id, workspace_dir)
+            except (OSError, RuntimeError, ValueError) as exc:
+                self.logger.exception("后台任务退出后清理项目失败")
+                self.status_widget.show_message(f"项目目录清理失败：{exc}")
+                continue
+            self._pending_task_deletions.pop(project_id, None)
+            removed_any = True
+
+        if removed_any:
+            self.tasks_page.refresh_history()
+            self.status_widget.show_message("任务记录和项目目录已删除。")
 
     def _asr_runtime_summary(self) -> str:
         """生成创建任务对话框使用的本次识别运行参数摘要。"""

@@ -105,6 +105,33 @@ class SQLiteProjectRepository:
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
+    def delete(self, project_id: str) -> bool:
+        """在一个事务中删除项目及其任务、字幕和导出记录。
+
+        删除顺序先从属表、后项目表，兼容早期数据库中没有配置
+        `ON DELETE CASCADE` 的外键定义。事务可以防止任务列表已经消失、
+        字幕记录却仍残留的半删除状态。
+        """
+
+        with self.database.connection() as connection:
+            connection.execute(
+                "DELETE FROM export_records WHERE project_id = ?",
+                (project_id,),
+            )
+            connection.execute(
+                "DELETE FROM subtitle_segments WHERE project_id = ?",
+                (project_id,),
+            )
+            connection.execute(
+                "DELETE FROM tasks WHERE project_id = ?",
+                (project_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM projects WHERE project_id = ?",
+                (project_id,),
+            )
+        return cursor.rowcount > 0
+
     @staticmethod
     def _from_row(row) -> Project:
         """把一行数据库记录还原为领域项目实体。"""

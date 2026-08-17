@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from core.domain.entities import Project
 from core.domain.enums import ProcessingMode, ProjectStatus, TaskStatus
 from core.dto.project_dto import CreateProjectInput, CreateProjectResult
 from core.dto.pipeline_dto import ProcessVideoInput, ProcessVideoResult
@@ -34,6 +36,8 @@ from core.ports.repository import (
     TaskRepository,
 )
 from core.ports.resource_scheduler import ResourceScheduler
+from core.ports.workspace import ProjectWorkspace
+from core.services.task_progress import overall_video_progress
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
 from core.usecases.reexport_project import ReexportProject
@@ -55,6 +59,7 @@ class TaskService:
     project_repository: ProjectRepository | None = None
     task_repository: TaskRepository | None = None
     subtitle_repository: SubtitleRepository | None = None
+    project_workspace: ProjectWorkspace | None = None
     resource_scheduler: ResourceScheduler | None = None
     _latest_task_summary: TaskSummaryDTO | None = field(default=None, init=False)
 
@@ -69,6 +74,17 @@ class TaskService:
             return "暂无活动任务"
         summary = self._latest_task_summary
         return f"{summary.task_type}: {summary.message} ({summary.progress}%)"
+
+    def current_project_id(self) -> str | None:
+        """返回这个服务实例最近处理的项目编号。
+
+        桌面端为每条视频流程创建独立服务实例，因此主窗口可以用这个只读
+        信息把新建项目与对应后台线程关联起来，支持运行中请求删除。
+        """
+
+        if self._latest_task_summary is None:
+            return None
+        return self._latest_task_summary.project_id or None
 
     def create_project(self, request: CreateProjectInput) -> CreateProjectResult:
         """把创建项目请求交给核心用例。"""
@@ -409,6 +425,7 @@ class TaskService:
             history.append(
                 VideoTaskHistoryDTO(
                     project_id=project.project_id,
+                    display_name=self._video_task_display_name(project),
                     source_video=project.source_video,
                     workspace_dir=project.workspace_dir,
                     output_path=project.output_path,
@@ -422,7 +439,17 @@ class TaskService:
                     task_status=(
                         latest_task.status.value if latest_task else "pending"
                     ),
-                    progress=latest_task.progress if latest_task else 0,
+                    progress=(
+                        overall_video_progress(
+                            task_type=latest_task.task_type,
+                            task_status=latest_task.status.value,
+                            task_progress=latest_task.progress,
+                            project_status=project.status.value,
+                            processing_mode=project.processing_mode.value,
+                        )
+                        if latest_task
+                        else 0
+                    ),
                     checkpoint=(
                         latest_task.checkpoint.value
                         if latest_task and latest_task.checkpoint
@@ -443,6 +470,76 @@ class TaskService:
             )
         return history
 
+    @staticmethod
+    def _video_task_display_name(project: Project) -> str:
+        """返回任务列表使用的可读名称，并兼容旧版本项目目录。
+
+        新项目目录采用“视频名-随机后缀”，所以在目录名后补回原视频扩展名。
+        旧项目的目录名等于内部项目编号，继续显示原视频文件名，避免历史任务
+        突然变成难以识别的 UUID。
+        """
+
+        if (
+            project.workspace_dir.name == project.project_id
+            or project.workspace_dir.parent.name != "projects"
+        ):
+            return project.source_video.name
+        return f"{project.workspace_dir.name}{project.source_video.suffix}"
+
+    def delete_video_task(
+        self,
+        project_id: str,
+        workspace_dir: str | None = None,
+    ) -> None:
+        """删除任意状态的视频项目记录及其项目目录。
+
+        参数：
+            project_id：任务列表选中的项目编号。
+            workspace_dir：可选的已知项目目录。运行中删除第一次已移除
+                数据库记录后，后台线程退出时可用它再次清理残留文件。
+
+        副作用：
+            会永久删除项目目录，并删除数据库中的项目、内部任务、字幕和
+            导出记录。源视频和项目目录外的用户成果不会被删除。
+        """
+
+        project_repository = self._require_dependency(
+            self.project_repository,
+            "项目仓储",
+        )
+        project_workspace = self._require_dependency(
+            self.project_workspace,
+            "项目工作区",
+        )
+        project = project_repository.get_by_id(project_id)
+        if project is None and not workspace_dir:
+            raise ValueError(f"未找到项目：{project_id}")
+
+        effective_workspace_dir = (
+            project.workspace_dir if project is not None else workspace_dir
+        )
+        if effective_workspace_dir is None:
+            raise RuntimeError("删除项目时缺少项目目录记录。")
+
+        # 第一步：先删除严格校验过的项目目录。目录被占用时数据库记录仍保留，
+        # 主窗口可以在后台任务退出后安全重试，不会留下无法定位的孤立文件。
+        project_workspace.delete_project_structure(
+            project_id,
+            Path(effective_workspace_dir),
+        )
+
+        # 第二步：文件清理成功后再原子删除数据库聚合记录。
+        # 第二次收尾调用时项目可能已经不存在，`delete` 返回 False 也属于成功。
+        deleted = project_repository.delete(project_id)
+        if project is not None and not deleted:
+            raise RuntimeError("项目目录已删除，但数据库记录删除失败。")
+
+        if (
+            self._latest_task_summary is not None
+            and self._latest_task_summary.project_id == project_id
+        ):
+            self._latest_task_summary = None
+
     def _remember_task(self, task) -> None:
         """把最近一次任务快照转成摘要，供界面层读取。"""
 
@@ -450,7 +547,11 @@ class TaskService:
             task_id=task.task_id,
             task_type=task.task_type,
             status=task.status.value,
-            progress=task.progress,
+            progress=overall_video_progress(
+                task_type=task.task_type,
+                task_status=task.status.value,
+                task_progress=task.progress,
+            ),
             current_step=task.current_step,
             message=task.message,
             project_id=task.project_id,

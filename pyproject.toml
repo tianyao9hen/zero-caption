@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zero-caption"
-version = "0.1.0"
+version = "0.1.1"
 description = "Windows desktop shell for video subtitle generation and translation"
 requires-python = ">=3.11"
 dependencies = [

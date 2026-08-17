@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,11 @@ class FFmpegAdapter:
             capture_output=True,
             text=True,
             check=False,
+            # 安装版是无控制台的桌面程序。Windows 默认启动控制台型
+            # `FFmpeg` 时会额外弹出终端窗口，因此必须显式隐藏子进程窗口。
+            creationflags=(
+                subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            ),
         )
         if completed.returncode != 0:
             raise FFmpegError(

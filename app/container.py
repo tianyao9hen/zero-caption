@@ -290,6 +290,7 @@ class AppContainer:
             project_repository=self.project_repository,
             task_repository=self.task_repository,
             subtitle_repository=self.subtitle_repository,
+            project_workspace=self.workspace,
             resource_scheduler=self.resource_scheduler,
         )
 

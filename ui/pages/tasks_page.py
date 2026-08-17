@@ -44,6 +44,7 @@ class TasksPage(QWidget):
     # 页面只发出“用户想创建任务”的意图，主窗口负责打开参数对话框并
     # 创建后台线程。这样页面不会承担主流程编排职责。
     create_requested = Signal()
+    delete_requested = Signal(str, str)
     retry_requested = Signal(str, str)
     reexport_requested = Signal(str, str, str)
     save_translation_requested = Signal(str, str, str)
@@ -98,6 +99,10 @@ class TasksPage(QWidget):
         self.refresh_button = QPushButton("刷新")
         self.refresh_button.setObjectName("refreshVideoTasksButton")
         self.refresh_button.clicked.connect(lambda: self.refresh_history())
+        self.delete_button = QPushButton("删除任务")
+        self.delete_button.setObjectName("deleteVideoTaskButton")
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self._request_delete)
         self.concurrency_label = QLabel("后台任务 0/1")
         self.concurrency_label.setObjectName("taskConcurrencyLabel")
         self.resource_policy_label = QLabel("识别与视频导出会自动排队串行执行")
@@ -106,6 +111,7 @@ class TasksPage(QWidget):
         task_actions = QHBoxLayout()
         task_actions.addWidget(self.create_task_button, 1)
         task_actions.addWidget(self.concurrency_label)
+        task_actions.addWidget(self.delete_button)
         task_actions.addWidget(self.refresh_button)
 
         self.task_list = QListWidget()
@@ -133,6 +139,11 @@ class TasksPage(QWidget):
         self.message_label = QLabel("暂无任务")
         self.error_label = QLabel("无")
         self.workspace_label = QLabel("-")
+        # 外部工具失败信息可能包含数千行日志。任务详情只承担摘要展示，
+        # 因此限制高度，避免长日志把下方的字幕翻译主视图挤出首屏。
+        # 完整文本仍通过鼠标悬停提示和可选择文本保留给诊断使用。
+        self.message_label.setMaximumHeight(64)
+        self.error_label.setMaximumHeight(88)
         for label in (
             self.source_video_label,
             self.project_id_label,
@@ -205,6 +216,7 @@ class TasksPage(QWidget):
         self.subtitle_list = QListWidget()
         self.subtitle_list.setObjectName("subtitleTranslationList")
         self.subtitle_list.setSpacing(3)
+        self.subtitle_list.setMinimumHeight(280)
         self.subtitle_list.currentItemChanged.connect(
             self._show_subtitle_item
         )
@@ -215,7 +227,7 @@ class TasksPage(QWidget):
         self.subtitle_source_text.setObjectName("selectedSubtitleSourceText")
         self.subtitle_source_text.setReadOnly(True)
         self.subtitle_source_text.setPlaceholderText("这里显示选中字幕的原文。")
-        self.subtitle_source_text.setMaximumHeight(72)
+        self.subtitle_source_text.setMinimumHeight(96)
 
         self.subtitle_translation_editor = QPlainTextEdit()
         self.subtitle_translation_editor.setObjectName(
@@ -224,7 +236,7 @@ class TasksPage(QWidget):
         self.subtitle_translation_editor.setPlaceholderText(
             "选择已有译文后，可在这里修改翻译结果。"
         )
-        self.subtitle_translation_editor.setMaximumHeight(88)
+        self.subtitle_translation_editor.setMinimumHeight(150)
 
         self.save_translation_button = QPushButton("保存当前译文")
         self.save_translation_button.setObjectName("saveSubtitleTranslationButton")
@@ -255,21 +267,41 @@ class TasksPage(QWidget):
         translation_group = QGroupBox("字幕翻译结果与单句修订")
         translation_layout = QVBoxLayout(translation_group)
         translation_layout.addWidget(self.translation_count_label)
-        translation_layout.addWidget(self.subtitle_list, 1)
-        translation_layout.addWidget(self.selected_subtitle_label)
-        translation_layout.addWidget(QLabel("原文"))
-        translation_layout.addWidget(self.subtitle_source_text)
-        translation_layout.addWidget(QLabel("译文"))
-        translation_layout.addWidget(self.subtitle_translation_editor)
-        translation_layout.addLayout(translation_actions)
-        translation_layout.addWidget(self.subtitle_feedback_label)
+
+        # 左侧把全部字幕结果作为主视图，翻译事件到达时会实时追加。
+        # 单句修订移到右侧后不再挤占主视图高度，用户可以连续查看更长的
+        # 翻译过程，同时仍能选择任意一条进行校对。
+        translation_result_panel = QWidget()
+        translation_result_layout = QVBoxLayout(translation_result_panel)
+        translation_result_layout.setContentsMargins(0, 0, 0, 0)
+        translation_result_layout.addWidget(QLabel("全部字幕翻译过程"))
+        translation_result_layout.addWidget(self.subtitle_list, 1)
+
+        revision_group = QGroupBox("单句修订")
+        revision_layout = QVBoxLayout(revision_group)
+        revision_layout.addWidget(self.selected_subtitle_label)
+        revision_layout.addWidget(QLabel("原文"))
+        revision_layout.addWidget(self.subtitle_source_text, 1)
+        revision_layout.addWidget(QLabel("已有译文 / 修订译文"))
+        revision_layout.addWidget(self.subtitle_translation_editor, 2)
+        revision_layout.addLayout(translation_actions)
+        revision_layout.addWidget(self.subtitle_feedback_label)
+
+        translation_splitter = QSplitter(Qt.Orientation.Horizontal)
+        translation_splitter.setObjectName("subtitleTranslationSplitter")
+        translation_splitter.addWidget(translation_result_panel)
+        translation_splitter.addWidget(revision_group)
+        translation_splitter.setStretchFactor(0, 2)
+        translation_splitter.setStretchFactor(1, 1)
+        translation_splitter.setSizes([560, 320])
+        translation_layout.addWidget(translation_splitter, 1)
 
         detail_splitter = QSplitter(Qt.Orientation.Vertical)
         detail_splitter.addWidget(detail_group)
         detail_splitter.addWidget(translation_group)
         detail_splitter.setStretchFactor(0, 0)
         detail_splitter.setStretchFactor(1, 1)
-        detail_splitter.setSizes([300, 470])
+        detail_splitter.setSizes([260, 540])
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(history_group)
@@ -400,6 +432,10 @@ class TasksPage(QWidget):
         self.error_label.setText(
             summary.message if summary.status == "failed" else "无"
         )
+        self.message_label.setToolTip(summary.message or "")
+        self.error_label.setToolTip(
+            summary.message if summary.status == "failed" else ""
+        )
         self.progress_bar.setValue(summary.progress)
 
     def update_translation_progress(self, progress: TranslationProgressDTO) -> None:
@@ -487,6 +523,8 @@ class TasksPage(QWidget):
         self.retry_count_label.setText(str(value.retry_count))
         self.message_label.setText(value.message or "-")
         self.error_label.setText(value.error_message or "无")
+        self.message_label.setToolTip(value.message or "")
+        self.error_label.setToolTip(value.error_message or "")
         self.workspace_label.setText(str(value.workspace_dir))
         self.progress_bar.setValue(value.progress)
         self._load_subtitle_translations(value.project_id)
@@ -540,6 +578,27 @@ class TasksPage(QWidget):
         if value is None:
             return
         self.retry_requested.emit(value.project_id, value.processing_mode)
+
+    def _request_delete(self) -> None:
+        """确认后提交删除整个视频项目及其工作目录的请求。"""
+
+        value = self._selected_history_value
+        if value is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认删除任务",
+            "删除后将永久移除这个视频任务的处理记录、字幕、缓存和项目目录。\n\n"
+            "正在处理的任务也可以删除，应用会在后台线程退出后再次清理。\n"
+            "原始视频和保存到项目目录外的成品不会被删除。\n\n"
+            f"任务：{value.display_name}\n"
+            f"项目目录：{value.workspace_dir}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.delete_requested.emit(value.project_id, str(value.workspace_dir))
 
     def _request_reexport(self) -> None:
         """把当前项目、导出模式和用户选择的成品路径发给主窗口。"""
@@ -651,6 +710,9 @@ class TasksPage(QWidget):
         self.reexport_output_edit.setEnabled(bool(exportable))
         self.reexport_browse_button.setEnabled(bool(exportable))
         self.reexport_button.setEnabled(bool(exportable))
+        # 删除属于项目级清理操作，不受完成、失败或运行状态限制。
+        # 运行中删除的最终收尾由主窗口在后台线程退出后完成。
+        self.delete_button.setEnabled(value is not None)
 
     def _show_subtitle_item(
         self,
@@ -863,7 +925,7 @@ class TasksPage(QWidget):
         item.setText(
             "\n".join(
                 [
-                    value.source_video.name,
+                    value.display_name,
                     (
                         f"{self._task_type_text(value.task_type)} · "
                         f"{self._status_text(status)} · {value.progress}%"

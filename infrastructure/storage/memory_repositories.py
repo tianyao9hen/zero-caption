@@ -40,6 +40,11 @@ class InMemoryProjectRepository:
             reverse=True,
         )
 
+    def delete(self, project_id: str) -> bool:
+        """删除指定项目，供核心服务和轻量测试使用。"""
+
+        return self._items.pop(project_id, None) is not None
+
 
 @dataclass(slots=True)
 class InMemoryTaskRepository:

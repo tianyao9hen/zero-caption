@@ -18,6 +18,11 @@ class ProjectRepository(Protocol):
 
     def list_all(self) -> list[Project]: ...
 
+    def delete(self, project_id: str) -> bool:
+        """删除项目及其从属记录，存在记录时返回 `True`。"""
+
+        ...
+
 
 class TaskRepository(Protocol):
     """任务记录持久化所需的最小能力。"""

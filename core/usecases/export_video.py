@@ -48,7 +48,9 @@ class ExportVideo:
         )
         task.start("开始导出")
         task.update_progress(
-            progress=60,
+            # 翻译阶段最高到 95%，导出从 96% 接续，避免阶段切换时
+            # 用户可见的总进度反而从 95% 倒退到 60%。
+            progress=96,
             current_step="调用导出器",
             checkpoint=TaskCheckpoint.TRANSLATED,
             message="字幕已准备好",
