@@ -57,8 +57,8 @@ class SettingsPage(QWidget):
         content = QWidget()
         content.setMaximumWidth(760)
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(20, 16, 20, 20)
-        content_layout.setSpacing(14)
+        content_layout.setContentsMargins(12, 8, 12, 12)
+        content_layout.setSpacing(8)
 
         content_layout.addWidget(self._build_runtime_group(settings, asr_hardware_info))
         content_layout.addWidget(self._build_asr_group(settings.engine.asr))
@@ -383,7 +383,7 @@ class SettingsPage(QWidget):
         self.system_prompt_field = QPlainTextEdit(settings.system_prompt)
         self.system_prompt_field.setObjectName("translationSystemPromptField")
         self.system_prompt_field.setPlaceholderText("输入翻译规则和返回格式要求")
-        self.system_prompt_field.setMinimumHeight(110)
+        self.system_prompt_field.setMinimumHeight(88)
 
         self.reset_system_prompt_button = QPushButton("重置为默认提示词")
         self.reset_system_prompt_button.setObjectName(
@@ -413,7 +413,7 @@ class SettingsPage(QWidget):
         self.test_prompt_field.setPlaceholderText(
             "例如：请把 Hello, world! 翻译成简体中文。"
         )
-        self.test_prompt_field.setMaximumHeight(90)
+        self.test_prompt_field.setMaximumHeight(72)
 
         self.test_button = QPushButton("测试当前配置")
         self.test_button.setObjectName("testTranslationModelButton")
@@ -423,7 +423,7 @@ class SettingsPage(QWidget):
         self.test_result_field.setObjectName("translationTestResultField")
         self.test_result_field.setReadOnly(True)
         self.test_result_field.setPlaceholderText("模型返回结果会显示在这里")
-        self.test_result_field.setMinimumHeight(100)
+        self.test_result_field.setMinimumHeight(72)
 
         button_layout = QHBoxLayout()
         button_layout.addStretch(1)
@@ -483,8 +483,8 @@ class SettingsPage(QWidget):
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        form.setHorizontalSpacing(16)
-        form.setVerticalSpacing(10)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(6)
         return form
 
     def _select_provider(self, provider: str) -> None:

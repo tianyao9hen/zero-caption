@@ -1,7 +1,7 @@
 """任务页面逐句翻译展示的单元测试。"""
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QMessageBox, QSplitter
+from PySide6.QtWidgets import QApplication, QGridLayout, QMessageBox, QSplitter
 
 from core.domain.entities import Project, Task
 from core.domain.enums import ExportMode, TaskCheckpoint
@@ -43,10 +43,15 @@ def test_tasks_page_appends_translation_progress_in_real_time(monkeypatch) -> No
     )
     assert translation_splitter is not None
     assert translation_splitter.orientation() is Qt.Orientation.Horizontal
-    assert page.subtitle_list.minimumHeight() >= 280
-    assert page.subtitle_translation_editor.minimumHeight() >= 150
-    assert page.message_label.maximumHeight() <= 64
-    assert page.error_label.maximumHeight() <= 88
+    details_grid = page.findChild(QGridLayout, "taskDetailsGrid")
+    assert details_grid is not None
+    assert details_grid.rowCount() == 6
+    assert details_grid.columnCount() == 6
+    assert 200 <= page.subtitle_list.minimumHeight() <= 220
+    assert page.subtitle_source_text.minimumHeight() <= 72
+    assert page.subtitle_translation_editor.minimumHeight() <= 100
+    assert page.message_label.maximumHeight() <= 48
+    assert page.error_label.maximumHeight() <= 48
     page.deleteLater()
     app.processEvents()
 
@@ -166,7 +171,7 @@ def test_tasks_page_disables_new_submission_only_when_capacity_is_full() -> None
     # act：第一个任务运行时仍有第二个槽位，第二个任务提交后容量耗尽。
     page.set_project_operation_capacity(active_count=1, max_concurrency=2)
     assert page.create_task_button.isEnabled() is True
-    assert page.concurrency_label.text() == "后台任务 1/2"
+    assert page.concurrency_label.text() == "后台 1/2"
     assert "自动排队串行执行" in page.resource_policy_label.text()
 
     page.set_project_operation_capacity(active_count=2, max_concurrency=2)
@@ -174,7 +179,7 @@ def test_tasks_page_disables_new_submission_only_when_capacity_is_full() -> None
     # assert：创建入口暂停，但用户仍可刷新并查看交错更新的任务历史。
     assert page.create_task_button.isEnabled() is False
     assert page.refresh_button.isEnabled() is True
-    assert page.concurrency_label.text() == "后台任务 2/2"
+    assert page.concurrency_label.text() == "后台 2/2"
     page.deleteLater()
     app.processEvents()
 

@@ -96,7 +96,9 @@ class MainWindow(QMainWindow):
         logo_path = resource_path("resources/icons/zero-caption-logo.png")
         self.setWindowIcon(QIcon(str(logo_path)))
         self.setWindowTitle(settings.app_name)
-        self.resize(1200, 800)
+        # 默认尺寸以常见笔记本屏幕为基准，尤其压低窗口高度。
+        # 页面内部仍使用分割器和滚动区，因此放大窗口时可以继续利用额外空间。
+        self.resize(1100, 680)
 
         # 这些控件都会随着主窗口长期存在，并由整个窗口共享。
         self.navigation = NavigationWidget()
@@ -155,24 +157,31 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         layout = QVBoxLayout(root)
+        layout.setContentsMargins(12, 8, 12, 6)
+        layout.setSpacing(8)
 
-        # 顶部区域放全局操作，这些按钮不应该随着页面切换而消失。
-        header = QHBoxLayout()
+        # 品牌、页面导航和全局操作共用一行，避免页眉占据两行高度。
+        # 独立的页眉控件也让测试可以直接验证这些元素确实位于同一布局中。
+        header = QWidget()
+        header.setObjectName("applicationHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
         self.brand_logo = QLabel()
         self.brand_logo.setObjectName("brandLogo")
-        self.brand_logo.setPixmap(self.windowIcon().pixmap(36, 36))
+        self.brand_logo.setPixmap(self.windowIcon().pixmap(28, 28))
         self.brand_logo.setToolTip("Zero Caption")
         title = QLabel("Zero Caption")
         self.import_button = QPushButton("创建视频任务")
         self.import_button.setObjectName("createVideoTaskHeaderButton")
         self.import_button.clicked.connect(self.open_import_dialog)
-        header.addWidget(self.brand_logo)
-        header.addWidget(title)
-        header.addStretch(1)
-        header.addWidget(self.import_button)
+        header_layout.addWidget(self.brand_logo)
+        header_layout.addWidget(title)
+        header_layout.addWidget(self.navigation)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self.import_button)
 
-        layout.addLayout(header)
-        layout.addWidget(self.navigation)
+        layout.addWidget(header)
         layout.addWidget(self.stack, 1)
         layout.addWidget(self.status_widget)
         self.setCentralWidget(root)

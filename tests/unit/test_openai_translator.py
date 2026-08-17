@@ -19,6 +19,7 @@ from infrastructure.translation.base import (
 from infrastructure.translation.openai_translator import (
     OpenAICompatibleTranslator,
     TRANSLATION_RESPONSE_CONTRACT,
+    TRANSLATION_RESPONSE_RETRY_INSTRUCTION,
 )
 
 
@@ -66,9 +67,10 @@ def test_translator_sends_only_text_and_language_context(monkeypatch) -> None:
     # assert：检查端点、语言和字幕正文；媒体路径从未进入请求结构。
     assert requests[0][0] == "https://translation.example/v1/chat/completions"
     assert requests[0][1]["Authorization"] == "Bearer secret-value"
+    assert requests[0][2]["thinking"] == {"type": "disabled"}
     assert requests[0][2]["enable_thinking"] is False
     assert requests[0][2]["response_format"] == {"type": "json_object"}
-    assert requests[0][2]["max_tokens"] >= 512
+    assert "max_tokens" not in requests[0][2]
     system_content = requests[0][2]["messages"][0]["content"]  # type: ignore[index]
     assert system_content.startswith("自定义字幕系统提示词")
     assert TRANSLATION_RESPONSE_CONTRACT in system_content
@@ -122,6 +124,7 @@ def test_translator_includes_raw_model_content_in_format_error(monkeypatch) -> N
         base_url="https://translation.example/v1",
         model="test-model",
         api_key_env="TEST_TRANSLATION_KEY",
+        max_retries=0,
         transport=transport,
     )
 
@@ -132,6 +135,112 @@ def test_translator_includes_raw_model_content_in_format_error(monkeypatch) -> N
     assert "翻译服务返回内容无法解析。" in str(exc_info.value)
     assert "大模型原始返回：" in str(exc_info.value)
     assert raw_content in str(exc_info.value)
+
+
+def test_translator_retries_empty_json_content_with_correction_prompt(
+    monkeypatch,
+) -> None:
+    """JSON 模式偶发空正文时，应自动重试并在后续请求追加纠正提示词。"""
+
+    # arrange：前两次模拟官方文档提到的空 content，第三次恢复正常。
+    monkeypatch.setenv("TEST_TRANSLATION_KEY", "secret-value")
+    requests: list[dict[str, object]] = []
+    sleeps: list[float] = []
+
+    def transport(endpoint, headers, payload, timeout):
+        requests.append(payload)
+        if len(requests) < 3:
+            return {
+                "model": "test-model",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"content": ""},
+                    }
+                ],
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"translations": [{"id": "seg-1", "text": "你好"}]},
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+    translator = OpenAICompatibleTranslator(
+        base_url="https://translation.example/v1",
+        model="test-model",
+        api_key_env="TEST_TRANSLATION_KEY",
+        max_retries=2,
+        transport=transport,
+        sleep=sleeps.append,
+    )
+
+    # act：响应级重试应对用户透明，最终仍返回正常字幕。
+    result = translator.translate_segments([_segments()[0]], "ja-JP", "zh-CN")
+
+    # assert：首次提示词不含纠正段，之后两次都明确要求非空 JSON；
+    # 每次重试都必须继续关闭思考模式，并且不能重新引入人为输出预算。
+    assert len(requests) == 3
+    assert sleeps == [1, 2]
+    for request in requests:
+        assert request["thinking"] == {"type": "disabled"}
+        assert request["enable_thinking"] is False
+        assert "max_tokens" not in request
+    first_prompt = requests[0]["messages"][0]["content"]  # type: ignore[index]
+    second_prompt = requests[1]["messages"][0]["content"]  # type: ignore[index]
+    assert TRANSLATION_RESPONSE_RETRY_INSTRUCTION not in first_prompt
+    assert TRANSLATION_RESPONSE_RETRY_INSTRUCTION in second_prompt
+    assert result[0].text == "你好"
+
+
+def test_translator_shows_full_response_after_repeated_empty_content(
+    monkeypatch,
+) -> None:
+    """空正文连续超过重试上限时，最终错误应展示服务端完整响应信息。"""
+
+    # arrange：完整响应保留 finish_reason，帮助用户区分空正文与网络失败。
+    monkeypatch.setenv("TEST_TRANSLATION_KEY", "secret-value")
+    attempts = 0
+
+    def transport(endpoint, headers, payload, timeout):
+        nonlocal attempts
+        attempts += 1
+        return {
+            "model": "test-model",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": ""},
+                }
+            ],
+            "usage": {"completion_tokens": 0},
+        }
+
+    translator = OpenAICompatibleTranslator(
+        base_url="https://translation.example/v1",
+        model="test-model",
+        api_key_env="TEST_TRANSLATION_KEY",
+        max_retries=1,
+        transport=transport,
+        sleep=lambda _seconds: None,
+    )
+
+    # act / assert：完成一次重试后才失败，并展示最后一次完整响应包。
+    with pytest.raises(TranslationResponseError) as exc_info:
+        translator.translate_segments([_segments()[0]], "ja-JP", "zh-CN")
+
+    assert attempts == 2
+    assert "翻译服务返回了空内容。 已自动重试 1 次仍未恢复。" in str(
+        exc_info.value
+    )
+    assert '"finish_reason": "stop"' in str(exc_info.value)
+    assert '"completion_tokens": 0' in str(exc_info.value)
 
 
 def test_translator_prefers_api_key_configured_in_application(monkeypatch) -> None:
@@ -239,7 +348,9 @@ def test_model_test_uses_current_system_and_user_prompts(monkeypatch) -> None:
     result = translator.test_prompt("请回答连接是否正常")
 
     assert result == "测试成功"
+    assert requests[0]["thinking"] == {"type": "disabled"}
     assert requests[0]["enable_thinking"] is False
+    assert "max_tokens" not in requests[0]
     assert requests[0]["messages"] == [
         {"role": "system", "content": "只输出测试结果"},
         {"role": "user", "content": "请回答连接是否正常"},

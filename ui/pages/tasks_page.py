@@ -13,8 +13,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
-    QFormLayout,
     QGroupBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -90,7 +91,7 @@ class TasksPage(QWidget):
 
         # 左侧区域沿用桌面任务工具常见的操作方式：创建入口固定在顶部，
         # 历史视频按最近更新时间排列，选择一项后在右侧查看详细状态。
-        self.create_task_button = QPushButton("创建视频任务")
+        self.create_task_button = QPushButton("新建任务")
         self.create_task_button.setObjectName("createVideoTaskButton")
         self.create_task_button.clicked.connect(
             lambda: self.create_requested.emit()
@@ -102,12 +103,15 @@ class TasksPage(QWidget):
         self.delete_button.setObjectName("deleteVideoTaskButton")
         self.delete_button.setEnabled(False)
         self.delete_button.clicked.connect(self._request_delete)
-        self.concurrency_label = QLabel("后台任务 0/1")
+        self.concurrency_label = QLabel("后台 0/1")
         self.concurrency_label.setObjectName("taskConcurrencyLabel")
-        self.resource_policy_label = QLabel("识别与视频下载生成会自动排队串行执行")
+        self.resource_policy_label = QLabel("自动排队串行执行")
         self.resource_policy_label.setObjectName("taskResourcePolicyLabel")
-        self.resource_policy_label.setWordWrap(True)
+        self.resource_policy_label.setToolTip(
+            "识别与视频下载生成会自动排队串行执行"
+        )
         task_actions = QHBoxLayout()
+        task_actions.setSpacing(6)
         task_actions.addWidget(self.create_task_button, 1)
         task_actions.addWidget(self.concurrency_label)
         task_actions.addWidget(self.delete_button)
@@ -115,12 +119,14 @@ class TasksPage(QWidget):
 
         self.task_list = QListWidget()
         self.task_list.setObjectName("videoTaskList")
-        self.task_list.setMinimumWidth(310)
-        self.task_list.setSpacing(4)
+        self.task_list.setMinimumWidth(280)
+        self.task_list.setSpacing(2)
         self.task_list.currentItemChanged.connect(self._show_history_item)
 
         history_group = QGroupBox("视频任务")
         history_layout = QVBoxLayout(history_group)
+        history_layout.setContentsMargins(8, 6, 8, 8)
+        history_layout.setSpacing(6)
         history_layout.addLayout(task_actions)
         history_layout.addWidget(self.resource_policy_label)
         history_layout.addWidget(self.task_list, 1)
@@ -141,8 +147,8 @@ class TasksPage(QWidget):
         # 外部工具失败信息可能包含数千行日志。任务详情只承担摘要展示，
         # 因此限制高度，避免长日志把下方的字幕翻译主视图挤出首屏。
         # 完整文本仍通过鼠标悬停提示和可选择文本保留给诊断使用。
-        self.message_label.setMaximumHeight(64)
-        self.error_label.setMaximumHeight(88)
+        self.message_label.setMaximumHeight(42)
+        self.error_label.setMaximumHeight(42)
         for label in (
             self.source_video_label,
             self.project_id_label,
@@ -151,6 +157,12 @@ class TasksPage(QWidget):
             self.error_label,
             self.workspace_label,
         ):
+            # 编号和路径通常没有天然换行点；忽略它们的横向尺寸提示，
+            # 才能让窗口在窄屏上按网格列宽换行，而不是被长文本强制撑宽。
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
             label.setWordWrap(True)
             label.setTextInteractionFlags(
                 label.textInteractionFlags()
@@ -179,29 +191,50 @@ class TasksPage(QWidget):
         self.download_button.setEnabled(False)
         self.download_button.clicked.connect(self._request_download)
         project_actions = QHBoxLayout()
+        project_actions.setSpacing(6)
         project_actions.addWidget(self.retry_button)
         project_actions.addStretch(1)
         project_actions.addWidget(self.export_mode_combo)
         project_actions.addWidget(self.download_button)
 
-        details_form = QFormLayout()
-        details_form.addRow("源视频", self.source_video_label)
-        details_form.addRow("项目编号", self.project_id_label)
-        details_form.addRow("最近任务", self.task_id_label)
-        details_form.addRow("当前阶段", self.task_type_label)
-        details_form.addRow("状态", self.status_label)
-        details_form.addRow("当前步骤", self.step_label)
-        details_form.addRow("恢复检查点", self.checkpoint_label)
-        details_form.addRow("重试次数", self.retry_count_label)
-        details_form.addRow("任务消息", self.message_label)
-        details_form.addRow("错误摘要", self.error_label)
-        details_form.addRow("项目目录", self.workspace_label)
+        # 详情值本身没有业务层级差异，因此用多列网格并排展示关联信息。
+        # 这样保持全部诊断字段可见，同时把十一行压缩为六行。
+        details_grid = QGridLayout()
+        details_grid.setObjectName("taskDetailsGrid")
+        details_grid.setContentsMargins(0, 0, 0, 0)
+        details_grid.setHorizontalSpacing(8)
+        details_grid.setVerticalSpacing(3)
+        details_grid.addWidget(QLabel("源视频"), 0, 0)
+        details_grid.addWidget(self.source_video_label, 0, 1, 1, 5)
+        details_grid.addWidget(QLabel("项目编号"), 1, 0)
+        details_grid.addWidget(self.project_id_label, 1, 1)
+        details_grid.addWidget(QLabel("最近任务"), 1, 2)
+        details_grid.addWidget(self.task_id_label, 1, 3, 1, 3)
+        details_grid.addWidget(QLabel("当前阶段"), 2, 0)
+        details_grid.addWidget(self.task_type_label, 2, 1)
+        details_grid.addWidget(QLabel("状态"), 2, 2)
+        details_grid.addWidget(self.status_label, 2, 3)
+        details_grid.addWidget(QLabel("恢复检查点"), 2, 4)
+        details_grid.addWidget(self.checkpoint_label, 2, 5)
+        details_grid.addWidget(QLabel("当前步骤"), 3, 0)
+        details_grid.addWidget(self.step_label, 3, 1, 1, 3)
+        details_grid.addWidget(QLabel("重试次数"), 3, 4)
+        details_grid.addWidget(self.retry_count_label, 3, 5)
+        details_grid.addWidget(QLabel("任务消息"), 4, 0)
+        details_grid.addWidget(self.message_label, 4, 1)
+        details_grid.addWidget(QLabel("错误摘要"), 4, 2)
+        details_grid.addWidget(self.error_label, 4, 3, 1, 3)
+        details_grid.addWidget(QLabel("项目目录"), 5, 0)
+        details_grid.addWidget(self.workspace_label, 5, 1, 1, 5)
+        details_grid.setColumnStretch(1, 2)
+        details_grid.setColumnStretch(3, 2)
+        details_grid.setColumnStretch(5, 1)
 
         self.translation_count_label = QLabel("尚未加载字幕")
         self.subtitle_list = QListWidget()
         self.subtitle_list.setObjectName("subtitleTranslationList")
-        self.subtitle_list.setSpacing(3)
-        self.subtitle_list.setMinimumHeight(280)
+        self.subtitle_list.setSpacing(2)
+        self.subtitle_list.setMinimumHeight(210)
         self.subtitle_list.currentItemChanged.connect(
             self._show_subtitle_item
         )
@@ -212,7 +245,7 @@ class TasksPage(QWidget):
         self.subtitle_source_text.setObjectName("selectedSubtitleSourceText")
         self.subtitle_source_text.setReadOnly(True)
         self.subtitle_source_text.setPlaceholderText("这里显示选中字幕的原文。")
-        self.subtitle_source_text.setMinimumHeight(96)
+        self.subtitle_source_text.setMinimumHeight(64)
 
         self.subtitle_translation_editor = QPlainTextEdit()
         self.subtitle_translation_editor.setObjectName(
@@ -221,7 +254,7 @@ class TasksPage(QWidget):
         self.subtitle_translation_editor.setPlaceholderText(
             "选择已有译文后，可在这里修改翻译结果。"
         )
-        self.subtitle_translation_editor.setMinimumHeight(150)
+        self.subtitle_translation_editor.setMinimumHeight(96)
 
         self.save_translation_button = QPushButton("保存当前译文")
         self.save_translation_button.setObjectName("saveSubtitleTranslationButton")
@@ -234,24 +267,28 @@ class TasksPage(QWidget):
         self.retranslate_button.setEnabled(False)
         self.retranslate_button.clicked.connect(self._request_retranslation)
         translation_actions = QHBoxLayout()
+        translation_actions.setSpacing(6)
         translation_actions.addWidget(self.save_translation_button)
         translation_actions.addWidget(self.retranslate_button)
         translation_actions.addStretch(1)
 
         self.subtitle_feedback_label = QLabel(
-            "手工保存和重新翻译只更新字幕；已下载的视频不会自动改变。"
+            "保存或重译只更新字幕，不会改动已下载视频。"
         )
         self.subtitle_feedback_label.setWordWrap(True)
 
         detail_group = QGroupBox("任务详情")
         detail_layout = QVBoxLayout(detail_group)
-        detail_layout.addLayout(details_form)
+        detail_layout.setContentsMargins(8, 6, 8, 8)
+        detail_layout.setSpacing(6)
+        detail_layout.addLayout(details_grid)
         detail_layout.addWidget(self.progress_bar)
         detail_layout.addLayout(project_actions)
 
         translation_group = QGroupBox("字幕翻译结果与单句修订")
         translation_layout = QVBoxLayout(translation_group)
-        translation_layout.addWidget(self.translation_count_label)
+        translation_layout.setContentsMargins(8, 6, 8, 8)
+        translation_layout.setSpacing(6)
 
         # 左侧把全部字幕结果作为主视图，翻译事件到达时会实时追加。
         # 单句修订移到右侧后不再挤占主视图高度，用户可以连续查看更长的
@@ -259,11 +296,18 @@ class TasksPage(QWidget):
         translation_result_panel = QWidget()
         translation_result_layout = QVBoxLayout(translation_result_panel)
         translation_result_layout.setContentsMargins(0, 0, 0, 0)
-        translation_result_layout.addWidget(QLabel("全部字幕翻译过程"))
+        translation_result_layout.setSpacing(4)
+        translation_result_header = QHBoxLayout()
+        translation_result_header.addWidget(QLabel("全部字幕翻译过程"))
+        translation_result_header.addStretch(1)
+        translation_result_header.addWidget(self.translation_count_label)
+        translation_result_layout.addLayout(translation_result_header)
         translation_result_layout.addWidget(self.subtitle_list, 1)
 
         revision_group = QGroupBox("单句修订")
         revision_layout = QVBoxLayout(revision_group)
+        revision_layout.setContentsMargins(8, 6, 8, 8)
+        revision_layout.setSpacing(4)
         revision_layout.addWidget(self.selected_subtitle_label)
         revision_layout.addWidget(QLabel("原文"))
         revision_layout.addWidget(self.subtitle_source_text, 1)
@@ -286,16 +330,17 @@ class TasksPage(QWidget):
         detail_splitter.addWidget(translation_group)
         detail_splitter.setStretchFactor(0, 0)
         detail_splitter.setStretchFactor(1, 1)
-        detail_splitter.setSizes([260, 540])
+        detail_splitter.setSizes([190, 490])
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(history_group)
         splitter.addWidget(detail_splitter)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([340, 820])
+        splitter.setSizes([310, 790])
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter, 1)
 
     def set_task_service(self, task_service: TaskService) -> None:
@@ -381,7 +426,7 @@ class TasksPage(QWidget):
         has_capacity = self._active_project_operations < self._max_project_concurrency
         self.create_task_button.setEnabled(has_capacity)
         self.concurrency_label.setText(
-            f"后台任务 {self._active_project_operations}/"
+            f"后台 {self._active_project_operations}/"
             f"{self._max_project_concurrency}"
         )
         if message:

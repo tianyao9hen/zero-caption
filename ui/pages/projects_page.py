@@ -42,6 +42,8 @@ class ProjectsPage(QWidget):
             )
 
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(6)
         form.addRow("项目编号", self.project_id_label)
         form.addRow("源视频", self.source_label)
         form.addRow("项目状态", self.status_label)
@@ -51,6 +53,8 @@ class ProjectsPage(QWidget):
         form.addRow("最近下载", self.output_label)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
         layout.addLayout(form)
         layout.addStretch(1)
 

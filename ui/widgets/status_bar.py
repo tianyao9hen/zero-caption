@@ -26,6 +26,8 @@ class StatusBarWidget(QWidget):
     def __init__(self, task_service: TaskService) -> None:
         super().__init__()
         layout = QHBoxLayout(self)
+        # 状态栏只承载一行摘要，紧凑边距可以把更多高度留给任务内容。
+        layout.setContentsMargins(4, 0, 4, 0)
         self.label = QLabel(task_service.summary())
         layout.addWidget(self.label)
         layout.addStretch(1)

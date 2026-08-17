@@ -35,8 +35,17 @@ TRANSLATION_RESPONSE_CONTRACT = (
     '{"translations":[{"id":"原始字幕编号","text":"译文"}]}。'
     "translations 的条目数量、顺序和 id 必须与输入 segments 完全一致，"
     "每个条目只能包含 id 和 text，text 必须是非空字符串。"
+    "即使输入字幕很短，也必须返回上述非空 JSON 对象，绝不能返回空 content。"
     "不要返回顶层数组、Markdown 代码块、思考过程、说明文字或其他字段。"
     "如果前面的风格说明与本响应格式约束冲突，以本约束为准。"
+)
+
+
+# JSON 模式偶尔会返回空正文。后续尝试追加一段更短、更直接的纠正指令，
+# 让模型重新聚焦于“必须产生非空 JSON”这一项，而不是机械重复首次请求。
+TRANSLATION_RESPONSE_RETRY_INSTRUCTION = (
+    "这是一次响应格式纠正重试。上一次响应为空或不符合协议；"
+    "本次必须立即返回非空 JSON 对象，且只能使用 translations、id、text 字段。"
 )
 
 
@@ -115,11 +124,11 @@ class OpenAICompatibleTranslator:
         )
         translated_by_id: dict[str, str] = {}
 
-        # 批次按字幕原始顺序发送，响应只负责填充文本，
-        # 这样时间轴和字幕顺序始终来自本地原始数据。
+        # 第一步：批次按字幕原始顺序发送，响应只负责填充文本。
+        # 网络临时错误由请求层重试；空正文或格式错误由响应层重新请求，
+        # 这样 JSON 模式偶发返回空 content 时不会立刻中断整个长视频任务。
         for batch in batches:
-            response = self._request_with_retry(batch)
-            for segment_id, text in self._parse_translations(response, batch):
+            for segment_id, text in self._translate_batch_with_retry(batch):
                 translated_by_id[segment_id] = text
 
         missing_ids = [
@@ -158,8 +167,10 @@ class OpenAICompatibleTranslator:
             {
                 "model": self.model,
                 "temperature": 0,
-                # OpenAI 兼容服务通常使用这个扩展字段关闭思考模式。
-                # 翻译任务只需要短文本结果，关闭思考可以显著减少等待时间。
+                # DeepSeek 的思考模式默认开启。官方 Chat Completions 协议使用
+                # `thinking.type=disabled` 显式关闭它；同时保留部分兼容服务使用的
+                # `enable_thinking=false`，避免模型测试只返回推理过程。
+                "thinking": {"type": "disabled"},
                 "enable_thinking": False,
                 "messages": [
                     {"role": "system", "content": self.system_prompt},
@@ -184,10 +195,51 @@ class OpenAICompatibleTranslator:
         if not self._resolved_api_key():
             raise TranslationConfigurationError("翻译 API 密钥尚未配置。")
 
-    def _request_with_retry(self, batch: TranslationBatch) -> JsonPayload:
+    def _translate_batch_with_retry(
+        self,
+        batch: TranslationBatch,
+    ) -> list[tuple[str, str]]:
+        """请求并解析一个字幕批次，对空响应和格式错误重新请求。
+
+        每次请求仍只发送当前批次的字幕文本与必要语言上下文。已经成功的
+        其他字幕不会重复发送，核心用例也会继续按句保存完成结果。
+        """
+
+        last_error: TranslationResponseError | None = None
+
+        # 第一步：首次请求使用标准协议；后续响应级重试追加纠正提示词。
+        for response_attempt in range(self.max_retries + 1):
+            response = self._request_with_retry(batch, response_attempt)
+            try:
+                return self._parse_translations(response, batch)
+            except TranslationResponseError as exc:
+                last_error = exc
+                if response_attempt >= self.max_retries:
+                    if response_attempt == 0:
+                        raise
+                    raise TranslationResponseError(
+                        f"{exc.message} 已自动重试 {response_attempt} 次仍未恢复。",
+                        raw_response=exc.raw_response,
+                    ) from exc
+
+            # 第二步：响应错误也使用指数退避，避免模型服务短暂抖动时连续施压。
+            self.sleep(2**response_attempt)
+
+        # 循环至少执行一次，这个分支只用于让类型检查器明确返回路径。
+        if last_error is not None:
+            raise last_error
+        raise TranslationResponseError("翻译请求未得到有效结果。")
+
+    def _request_with_retry(
+        self,
+        batch: TranslationBatch,
+        response_attempt: int = 0,
+    ) -> JsonPayload:
         """发送一个批次，并对网络或服务端临时错误做指数退避重试。"""
 
-        return self._request_payload_with_retry(self._build_payload(batch))
+        return self._request_payload_with_retry(
+            self._build_payload(batch, response_attempt=response_attempt)
+        )
 
     def _request_payload_with_retry(self, payload: JsonPayload) -> JsonPayload:
         """发送一个请求正文，并统一应用认证、超时和重试策略。"""
@@ -229,7 +281,11 @@ class OpenAICompatibleTranslator:
         with urllib_request.urlopen(request, timeout=self.timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    def _build_payload(self, batch: TranslationBatch) -> JsonPayload:
+    def _build_payload(
+        self,
+        batch: TranslationBatch,
+        response_attempt: int = 0,
+    ) -> JsonPayload:
         """构造只包含字幕文本和必要语言上下文的请求体。"""
 
         items = [
@@ -248,14 +304,15 @@ class OpenAICompatibleTranslator:
             # DeepSeek 和多数 OpenAI 兼容接口使用 `json_object` 开启 JSON 模式。
             # 顶层对象再包含 translations 数组，比要求模型直接返回顶层数组更稳定。
             "response_format": {"type": "json_object"},
-            # JSON 模式下输出预算过小会截断正文。这里按输入字符数动态放大预算，
-            # 同时设置上下限，避免短字幕浪费过多配额或长字幕没有足够输出空间。
-            "max_tokens": self._max_output_tokens(batch),
-            # 正式翻译与模型测试保持相同策略，避免后台逐句请求意外进入
-            # 长时间思考模式，拖慢整条字幕处理链路。
+            # DeepSeek 使用官方 `thinking` 参数关闭思考；`enable_thinking` 则用于
+            # 兼容其他模型服务。请求不设置 `max_tokens`，输出上限完全交由服务端管理。
+            "thinking": {"type": "disabled"},
             "enable_thinking": False,
             "messages": [
-                {"role": "system", "content": self._translation_system_prompt()},
+                {
+                    "role": "system",
+                    "content": self._translation_system_prompt(response_attempt),
+                },
                 {
                     "role": "user",
                     "content": json.dumps(user_payload, ensure_ascii=False),
@@ -275,12 +332,18 @@ class OpenAICompatibleTranslator:
         """
 
         content = self._extract_content(response)
+        response_diagnostic = self._response_diagnostic(response, content)
+        if not content.strip():
+            raise TranslationResponseError(
+                "翻译服务返回了空内容。",
+                raw_response=response_diagnostic,
+            )
         try:
             parsed = json.loads(self._strip_code_fence(str(content)))
         except (TypeError, ValueError) as exc:
             raise TranslationResponseError(
                 "翻译服务返回内容无法解析。",
-                raw_response=content,
+                raw_response=response_diagnostic,
             ) from exc
 
         # 第一步：把当前标准对象和历史常见格式统一成条目列表。
@@ -297,7 +360,7 @@ class OpenAICompatibleTranslator:
         if not isinstance(parsed, list):
             raise TranslationResponseError(
                 "翻译响应中没有有效的 translations 字幕列表。",
-                raw_response=content,
+                raw_response=response_diagnostic,
             )
 
         # 第二步：优先解析带 id 的对象。单句请求若只返回 text，使用本地唯一 id
@@ -309,7 +372,7 @@ class OpenAICompatibleTranslator:
                 if not isinstance(text, str) or not text.strip():
                     raise TranslationResponseError(
                         "翻译响应包含空字幕文本。",
-                        raw_response=content,
+                        raw_response=response_diagnostic,
                     )
                 segment_id = item.get("id")
                 if segment_id is None and len(batch.segments) == 1 and index == 0:
@@ -317,10 +380,10 @@ class OpenAICompatibleTranslator:
                 if segment_id is None:
                     raise TranslationResponseError(
                         "翻译响应缺少字幕编号。",
-                        raw_response=content,
+                        raw_response=response_diagnostic,
                     )
                 result.append((str(segment_id), text.strip()))
-            self._validate_response_ids(result, batch, content)
+            self._validate_response_ids(result, batch, response_diagnostic)
             return result
 
         if len(parsed) != len(batch.segments) or not all(
@@ -328,20 +391,20 @@ class OpenAICompatibleTranslator:
         ):
             raise TranslationResponseError(
                 "翻译响应条目数量或格式不正确。",
-                raw_response=content,
+                raw_response=response_diagnostic,
             )
         result = [
             (segment.segment_id, str(text).strip())
             for segment, text in zip(batch.segments, parsed, strict=True)
         ]
-        self._validate_response_ids(result, batch, content)
+        self._validate_response_ids(result, batch, response_diagnostic)
         return result
 
     def _validate_response_ids(
         self,
         result: list[tuple[str, str]],
         batch: TranslationBatch,
-        content: str,
+        response_diagnostic: str,
     ) -> None:
         """确认模型返回的字幕编号与当前请求完全一致。"""
 
@@ -349,19 +412,16 @@ class OpenAICompatibleTranslator:
         if actual_ids != list(batch.segment_ids):
             raise TranslationResponseError(
                 "翻译响应字幕编号或顺序与请求不一致。",
-                raw_response=content,
+                raw_response=response_diagnostic,
             )
 
-    def _translation_system_prompt(self) -> str:
-        """组合用户可编辑的翻译风格和程序维护的响应格式协议。"""
+    def _translation_system_prompt(self, response_attempt: int = 0) -> str:
+        """组合用户翻译风格、响应协议和可选的重试纠正指令。"""
 
-        return f"{self.system_prompt}\n\n{TRANSLATION_RESPONSE_CONTRACT}"
-
-    def _max_output_tokens(self, batch: TranslationBatch) -> int:
-        """按当前批次正文长度估算 JSON 译文所需的最大输出令牌数。"""
-
-        source_characters = sum(len(segment.text) for segment in batch.segments)
-        return max(512, min(8_192, source_characters * 2 + 256))
+        prompt = f"{self.system_prompt}\n\n{TRANSLATION_RESPONSE_CONTRACT}"
+        if response_attempt > 0:
+            prompt = f"{prompt}\n\n{TRANSLATION_RESPONSE_RETRY_INSTRUCTION}"
+        return prompt
 
     def _extract_content(self, response: JsonPayload) -> str:
         """从兼容 Chat Completions 的响应中读取第一条文本正文。"""
@@ -370,10 +430,32 @@ class OpenAICompatibleTranslator:
             choices = response["choices"]
             content = choices[0]["message"]["content"]  # type: ignore[index]
         except (KeyError, IndexError, TypeError) as exc:
-            raise TranslationResponseError("翻译服务响应缺少文本内容。") from exc
+            raise TranslationResponseError(
+                "翻译服务响应缺少文本内容。",
+                raw_response=self._serialize_response(response),
+            ) from exc
         if not isinstance(content, str):
-            raise TranslationResponseError("翻译服务响应的文本内容格式不正确。")
+            raise TranslationResponseError(
+                "翻译服务响应的文本内容格式不正确。",
+                raw_response=self._serialize_response(response),
+            )
         return content
+
+    def _response_diagnostic(
+        self,
+        response: JsonPayload,
+        content: str,
+    ) -> str:
+        """优先返回模型正文，空正文时改为展示完整响应包。"""
+
+        if content.strip():
+            return content
+        return self._serialize_response(response)
+
+    def _serialize_response(self, response: JsonPayload) -> str:
+        """把不含请求密钥的服务响应转换成便于弹窗阅读的 JSON 文本。"""
+
+        return json.dumps(response, ensure_ascii=False, indent=2, default=str)
 
     def _strip_code_fence(self, content: str) -> str:
         """去掉模型偶尔包裹 JSON 的 Markdown 代码围栏。"""

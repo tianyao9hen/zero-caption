@@ -6,7 +6,7 @@ from threading import Event, Lock
 from time import monotonic
 
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from app.container import AppContainer
 from config.settings import EngineSettings, RuntimeSettings, Settings, TaskSettings
@@ -43,11 +43,17 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
     # act：通过容器创建完整主窗口，而不是手工绕过装配层。
     window = container.create_main_window()
 
-    # assert：窗口标题、尺寸和核心页面对象均已创建。
+    # assert：窗口使用更紧凑的默认尺寸，页眉元素位于同一个横向布局。
     assert window.windowTitle() == "Zero Caption"
     assert window.windowIcon().isNull() is False
     assert window.brand_logo.pixmap().isNull() is False
-    assert window.size().width() == 1200
+    assert window.size().width() == 1100
+    assert window.size().height() == 680
+    header = window.findChild(QWidget, "applicationHeader")
+    assert header is not None
+    assert header.layout().indexOf(window.brand_logo) >= 0
+    assert header.layout().indexOf(window.navigation) >= 0
+    assert header.layout().indexOf(window.import_button) >= 0
     assert window.projects_page is not None
     assert window.tasks_page is not None
     assert window.navigation.projects_button.isChecked() is True
@@ -59,7 +65,7 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
 
     assert window.stack.currentWidget() is window.tasks_page
     assert window.navigation.tasks_button.isChecked() is True
-    assert window.tasks_page.create_task_button.text() == "创建视频任务"
+    assert window.tasks_page.create_task_button.text() == "新建任务"
     window.close()
     window.deleteLater()
     app.processEvents()
@@ -190,7 +196,7 @@ def test_main_window_runs_multiple_video_operations_until_capacity(
     # assert：两个线程同时存活，容量已满时两个创建入口都暂停。
     assert both_started.is_set() is True
     assert len(window._pipeline_runners) == 2
-    assert window.tasks_page.concurrency_label.text() == "后台任务 2/2"
+    assert window.tasks_page.concurrency_label.text() == "后台 2/2"
     assert window.tasks_page.create_task_button.isEnabled() is False
     assert window.import_button.isEnabled() is False
 
