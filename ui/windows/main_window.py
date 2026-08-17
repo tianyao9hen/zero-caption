@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -142,8 +142,8 @@ class MainWindow(QMainWindow):
         self.tasks_page.retry_requested.connect(
             self._handle_retry_requested
         )
-        self.tasks_page.reexport_requested.connect(
-            self._handle_reexport_requested
+        self.tasks_page.download_requested.connect(
+            self._handle_download_requested
         )
         self.tasks_page.save_translation_requested.connect(
             self._handle_subtitle_edit_requested
@@ -246,13 +246,13 @@ class MainWindow(QMainWindow):
             task_service=task_service,
         )
 
-    def _handle_reexport_requested(
+    def _handle_download_requested(
         self,
         project_id: str,
         export_mode_value: str,
         output_path_value: str,
     ) -> None:
-        """在后台使用当前字幕、模式和用户选择的路径重新导出成品。"""
+        """在后台使用当前字幕生成用户主动下载的成品。"""
 
         request = ReexportProjectInput(
             project_id=project_id,
@@ -262,8 +262,8 @@ class MainWindow(QMainWindow):
         task_service = self.task_service_factory()
         self._start_project_operation(
             operation=lambda: task_service.reexport_project(request),
-            success_handler=self._handle_reexport_success,
-            message="正在使用当前字幕重新导出成品……",
+            success_handler=self._handle_download_success,
+            message="正在生成下载成品……",
             project_id=project_id,
             task_service=task_service,
         )
@@ -371,12 +371,12 @@ class MainWindow(QMainWindow):
         self.projects_page.show_result(result)
         self.tasks_page.refresh_history()
         self.navigation.set_current_page(1)
-        if result.export is not None:
-            output_path = result.export.export_record.output_path
-            self.status_widget.show_message(f"处理完成：{output_path}")
-            return
-
         subtitle_path = result.subtitle_path
+        if result.translation is not None:
+            self.status_widget.show_message(
+                f"翻译完成，可在任务页下载成品：{subtitle_path}"
+            )
+            return
         self.status_widget.show_message(f"原文字幕生成完成：{subtitle_path}")
 
     def _handle_pipeline_failure(
@@ -399,19 +399,30 @@ class MainWindow(QMainWindow):
             return
 
         self.tasks_page.refresh_history()
-        self.status_widget.show_message(f"处理失败：{message}")
-        QMessageBox.critical(self, "处理失败", message)
+        # 状态栏只显示第一行摘要，避免模型长响应挤压主窗口布局；
+        # 完整诊断内容保留在下面的错误对话框中供用户查看。
+        summary = message.splitlines()[0] if message else "未知错误"
+        self.status_widget.show_message(f"处理失败：{summary}")
+        # 模型原始返回可能包含 Markdown 或 HTML 片段。显式使用纯文本格式，
+        # 既能让用户看到真实内容，也避免 Qt 把模型文本当成富文本重新解释。
+        error_dialog = QMessageBox(self)
+        error_dialog.setIcon(QMessageBox.Icon.Critical)
+        error_dialog.setWindowTitle("处理失败")
+        error_dialog.setTextFormat(Qt.TextFormat.PlainText)
+        error_dialog.setText(message)
+        error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        error_dialog.exec()
 
-    def _handle_reexport_success(self, result: ExportVideoResult) -> None:
-        """刷新项目历史，并展示重新导出的最新文件路径。"""
+    def _handle_download_success(self, result: ExportVideoResult) -> None:
+        """刷新项目历史，并展示用户下载的最新文件路径。"""
 
         if result.project.project_id in self._pending_task_deletions:
-            self.status_widget.show_message("后台导出已退出，正在完成项目删除。")
+            self.status_widget.show_message("后台下载已退出，正在完成项目删除。")
             return
 
         self.tasks_page.refresh_history()
         output_path = result.export_record.output_path
-        self.status_widget.show_message(f"重新导出完成：{output_path}")
+        self.status_widget.show_message(f"下载完成：{output_path}")
 
     def _release_pipeline_runner(self, runner: PipelineRunner) -> None:
         """释放指定已结束线程，并立即开放一个普通任务并发槽位。"""
@@ -432,7 +443,7 @@ class MainWindow(QMainWindow):
         return len(self._pipeline_runners) < self._max_pipeline_concurrency
 
     def _active_pipeline_project_ids(self) -> set[str]:
-        """返回正在恢复或重新导出的已有项目编号集合。"""
+        """返回正在恢复或生成下载成品的已有项目编号集合。"""
 
         # 新建流程启动时尚未生成项目编号。每个后台线程持有独立服务实例，
         # 创建项目用例结束后即可从该实例读取准确编号，不需要按事件顺序猜测。
@@ -708,7 +719,7 @@ class MainWindow(QMainWindow):
         self.tasks_page.refresh_history(select_project_id=result.project_id)
         message = (
             f"第 {result.item.current_index} 条译文已更新："
-            f"{result.subtitle_path}。已导出的视频不会自动改变。"
+            f"{result.subtitle_path}。已下载的视频不会自动改变。"
         )
         self.tasks_page.show_subtitle_update_result(result.item, message)
         self.status_widget.show_message(

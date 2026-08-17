@@ -20,7 +20,7 @@ class StatusBarWidget(QWidget):
         "translate_subtitles": "逐句翻译",
         "edit_subtitle_translation": "编辑单句译文",
         "retranslate_subtitle": "重新翻译单句",
-        "export_video": "导出视频",
+        "export_video": "生成下载成品",
     }
 
     def __init__(self, task_service: TaskService) -> None:

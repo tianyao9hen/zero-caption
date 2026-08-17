@@ -1,7 +1,7 @@
 """无界面 MVP 主链路集成测试。
 
 测试用轻量适配器替代真实模型和网络服务，验证四个核心用例可以通过
-`TaskService` 串成“导入 -> 识别 -> 翻译 -> 外挂导出”的完整流程。
+`TaskService` 串成“导入 -> 识别 -> 翻译”的自动流程，视频下载单独验证。
 """
 
 from __future__ import annotations
@@ -233,17 +233,17 @@ def test_task_service_runs_complete_mvp_pipeline_and_reuses_translation(tmp_path
     assert exported.task.checkpoint is TaskCheckpoint.EXPORTED
 
 
-def test_task_service_process_video_orchestrates_the_four_steps(tmp_path) -> None:
-    """完整编排入口应按导入、识别、翻译、导出的顺序返回结果。"""
+def test_task_service_process_video_stops_after_translation(tmp_path) -> None:
+    """完整编排应在翻译完成后结束，等待用户主动下载视频。"""
 
     # arrange：为服务注入全套伪适配器，避免测试依赖本地模型或网络。
     workspace = WorkspaceManager(tmp_path / "workspace")
     projects = InMemoryProjectRepository()
     tasks = InMemoryTaskRepository()
     subtitles = InMemorySubtitleRepository()
-    exports = InMemoryExportRecordRepository()
     source_video = tmp_path / "demo.mp4"
     source_video.write_bytes(b"fake video")
+    source_content = source_video.read_bytes()
 
     service = TaskService(
         create_project_usecase=CreateProject(
@@ -270,12 +270,7 @@ def test_task_service_process_video_orchestrates_the_four_steps(tmp_path) -> Non
             translator=FakeTranslator(),
             subtitle_writer=SrtWriter(),
         ),
-        export_video_usecase=ExportVideo(
-            project_repository=projects,
-            task_repository=tasks,
-            export_record_repository=exports,
-            exporter=SoftSubtitleExporter(),
-        ),
+        project_repository=projects,
     )
 
     # act：只调用供 UI 和命令行共用的一站式入口。
@@ -285,15 +280,19 @@ def test_task_service_process_video_orchestrates_the_four_steps(tmp_path) -> Non
             source_language="en",
             target_language="zh-CN",
             workspace_dir=workspace.root,
-            output_path=workspace.root / "final.mp4",
+            # 完整流程即使收到旧调用方传来的路径，也不能自动写入用户目录。
+            output_path=source_video,
         )
     )
 
-    # assert：四个结果应来自同一个项目，最终文件和外挂字幕都已落盘。
+    # assert：翻译结果保存在项目中，外部路径未写入且源视频内容保持不变。
     assert result.project.project.project_id == result.transcription.project_id
     assert result.translation.project_id == result.project.project.project_id
-    assert result.export.export_record.output_path == workspace.root / "final.mp4"
-    assert result.export.export_record.output_path.is_file()
+    assert result.export is None
+    assert result.final_project.status is ProjectStatus.COMPLETED
+    assert result.final_project.output_path is None
+    assert source_video.read_bytes() == source_content
+    assert result.translation.subtitle_path.is_file()
 
 
 def test_task_service_can_finish_after_local_transcription_without_translation(
@@ -433,7 +432,7 @@ def test_task_service_retries_existing_project_and_reuses_completed_steps(
     assert audio_extractor.call_count == 1
     assert asr_engine.call_count == 1
     assert translator.call_count == 3
-    assert result.export is not None
-    assert result.export.export_record.output_path.is_file()
+    assert result.export is None
+    assert result.translation.subtitle_path.is_file()
     history = service.list_video_tasks()
     assert history[0].retry_count == 1

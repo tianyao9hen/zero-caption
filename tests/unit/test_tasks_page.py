@@ -434,11 +434,11 @@ def test_tasks_page_emits_retry_for_failed_project(tmp_path) -> None:
     app.processEvents()
 
 
-def test_tasks_page_emits_reexport_with_selected_mode(
+def test_tasks_page_download_chooses_directory_and_keeps_source_video(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """完整译文项目应允许选择导出模式并请求重新导出。"""
+    """完整译文项目应在点击下载后选择目录并生成安全的新文件名。"""
 
     app = QApplication.instance() or QApplication([])
     projects = InMemoryProjectRepository()
@@ -474,7 +474,7 @@ def test_tasks_page_emits_reexport_with_selected_mode(
         )
     )
     emitted: list[tuple[str, str, str]] = []
-    page.reexport_requested.connect(
+    page.download_requested.connect(
         lambda project_id, mode, output_path: emitted.append(
             (project_id, mode, output_path)
         )
@@ -483,17 +483,18 @@ def test_tasks_page_emits_reexport_with_selected_mode(
     page.refresh_history()
     burn_in_index = page.export_mode_combo.findData(ExportMode.BURN_IN.value)
     page.export_mode_combo.setCurrentIndex(burn_in_index)
-    selected_output = tmp_path / "new-results" / "reexport-final.mp4"
+    selected_directory = tmp_path / "new-results"
+    selected_directory.mkdir()
     monkeypatch.setattr(
-        "ui.pages.tasks_page.QFileDialog.getSaveFileName",
-        lambda *_args, **_kwargs: (str(selected_output), "视频文件"),
+        "ui.pages.tasks_page.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(selected_directory),
     )
-    page.reexport_browse_button.click()
-    page.reexport_button.click()
+    page.download_button.click()
     app.processEvents()
 
-    assert page.reexport_button.isEnabled() is True
-    assert page.reexport_output_edit.text() == str(selected_output)
+    selected_output = selected_directory / "reexport-字幕.mp4"
+    assert page.download_button.isEnabled() is True
+    assert project.source_video == tmp_path / "reexport.mp4"
     assert emitted == [
         (
             project.project_id,

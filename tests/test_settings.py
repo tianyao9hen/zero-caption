@@ -164,6 +164,30 @@ api_key = "local-secret"
     assert settings.runtime.ffmpeg_path == "resources/bin/ffmpeg/ffmpeg.exe"
 
 
+def test_load_settings_recovers_blank_legacy_system_prompt(tmp_path):
+    """旧用户配置中的空提示词不应覆盖软件内置的可用提示词。"""
+
+    # arrange：卸载时允许保留用户数据，因此重装后仍可能读到旧版本保存的空字符串。
+    user_file = tmp_path / "settings.toml"
+    user_file.write_text(
+        """
+[engine.translation]
+system_prompt = "   "
+""",
+        encoding="utf-8",
+    )
+
+    # act：按真实应用启动路径合并随包默认配置和保留下来的用户配置。
+    settings = load_settings(user_path=user_file)
+
+    # assert：空白旧值回退到内置提示词，设置页仍能直接展示和继续编辑。
+    assert (
+        settings.engine.translation.system_prompt
+        == TranslationSettings().system_prompt
+    )
+    assert settings.engine.translation.system_prompt.strip()
+
+
 def test_save_translation_settings_round_trip_and_masks_repr(tmp_path):
     """设置页保存的翻译参数应可重新加载，配置对象表示不应泄露密钥。"""
 

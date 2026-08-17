@@ -19,7 +19,7 @@ from ui.pages.projects_page import ProjectsPage
 
 
 def test_projects_page_shows_local_transcription_artifacts(tmp_path) -> None:
-    """仅识别结果应展示音频和原文字幕，并明确说明未导出视频。"""
+    """仅识别结果应展示音频和原文字幕，并明确说明可稍后下载。"""
 
     # arrange：构造已经完成本地识别的最小核心 DTO，避免测试真实模型。
     app = QApplication.instance() or QApplication([])
@@ -63,6 +63,6 @@ def test_projects_page_shows_local_transcription_artifacts(tmp_path) -> None:
     assert page.status_label.text() == ProjectStatus.COMPLETED.value
     assert page.audio_label.text() == str(Path(audio_path))
     assert page.subtitle_label.text() == str(Path(subtitle_path))
-    assert page.output_label.text() == "未执行视频导出"
+    assert page.output_label.text() == "等待用户下载"
     page.deleteLater()
     app.processEvents()

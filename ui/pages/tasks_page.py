@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -46,7 +45,7 @@ class TasksPage(QWidget):
     create_requested = Signal()
     delete_requested = Signal(str, str)
     retry_requested = Signal(str, str)
-    reexport_requested = Signal(str, str, str)
+    download_requested = Signal(str, str, str)
     save_translation_requested = Signal(str, str, str)
     retranslate_requested = Signal(str, str)
 
@@ -56,7 +55,7 @@ class TasksPage(QWidget):
         "translate_subtitles": "逐句翻译",
         "edit_subtitle_translation": "编辑单句译文",
         "retranslate_subtitle": "重新翻译单句",
-        "export_video": "导出视频",
+        "export_video": "下载成品",
     }
     _STATUS_LABELS = {
         "new": "新建",
@@ -74,7 +73,7 @@ class TasksPage(QWidget):
         "transcribed": "已生成原文字幕",
         "translated": "已生成译文字幕",
         "composed": "已完成合成",
-        "exported": "已导出",
+        "exported": "已生成下载成品",
     }
 
     def __init__(self, task_service: TaskService) -> None:
@@ -105,7 +104,7 @@ class TasksPage(QWidget):
         self.delete_button.clicked.connect(self._request_delete)
         self.concurrency_label = QLabel("后台任务 0/1")
         self.concurrency_label.setObjectName("taskConcurrencyLabel")
-        self.resource_policy_label = QLabel("识别与视频导出会自动排队串行执行")
+        self.resource_policy_label = QLabel("识别与视频下载生成会自动排队串行执行")
         self.resource_policy_label.setObjectName("taskResourcePolicyLabel")
         self.resource_policy_label.setWordWrap(True)
         task_actions = QHBoxLayout()
@@ -175,28 +174,15 @@ class TasksPage(QWidget):
         )
         self.export_mode_combo.addItem("烧录字幕", ExportMode.BURN_IN.value)
         self.export_mode_combo.setEnabled(False)
-        self.reexport_output_edit = QLineEdit()
-        self.reexport_output_edit.setObjectName("reexportOutputPathField")
-        self.reexport_output_edit.setPlaceholderText("选择重新导出的成品文件")
-        self.reexport_output_edit.setEnabled(False)
-        self.reexport_browse_button = QPushButton("浏览...")
-        self.reexport_browse_button.setObjectName("browseReexportOutputButton")
-        self.reexport_browse_button.setEnabled(False)
-        self.reexport_browse_button.clicked.connect(
-            self._browse_reexport_output
-        )
-        reexport_output_row = QHBoxLayout()
-        reexport_output_row.addWidget(self.reexport_output_edit, 1)
-        reexport_output_row.addWidget(self.reexport_browse_button)
-        self.reexport_button = QPushButton("重新导出成品")
-        self.reexport_button.setObjectName("reexportProjectButton")
-        self.reexport_button.setEnabled(False)
-        self.reexport_button.clicked.connect(self._request_reexport)
+        self.download_button = QPushButton("下载成品...")
+        self.download_button.setObjectName("downloadProjectButton")
+        self.download_button.setEnabled(False)
+        self.download_button.clicked.connect(self._request_download)
         project_actions = QHBoxLayout()
         project_actions.addWidget(self.retry_button)
         project_actions.addStretch(1)
         project_actions.addWidget(self.export_mode_combo)
-        project_actions.addWidget(self.reexport_button)
+        project_actions.addWidget(self.download_button)
 
         details_form = QFormLayout()
         details_form.addRow("源视频", self.source_video_label)
@@ -210,7 +196,6 @@ class TasksPage(QWidget):
         details_form.addRow("任务消息", self.message_label)
         details_form.addRow("错误摘要", self.error_label)
         details_form.addRow("项目目录", self.workspace_label)
-        details_form.addRow("成品保存为", reexport_output_row)
 
         self.translation_count_label = QLabel("尚未加载字幕")
         self.subtitle_list = QListWidget()
@@ -254,7 +239,7 @@ class TasksPage(QWidget):
         translation_actions.addStretch(1)
 
         self.subtitle_feedback_label = QLabel(
-            "手工保存和重新翻译只更新字幕文件；已导出的视频不会自动改变。"
+            "手工保存和重新翻译只更新字幕；已下载的视频不会自动改变。"
         )
         self.subtitle_feedback_label.setWordWrap(True)
 
@@ -384,7 +369,7 @@ class TasksPage(QWidget):
             active_count：当前仍在运行的视频级后台线程数量。
             max_concurrency：配置允许同时运行的最大视频流程数量。
             message：可选的当前操作提示。
-            active_project_ids：正在恢复或重新导出的已有项目编号。
+            active_project_ids：正在恢复或生成下载成品的已有项目编号。
 
         这个方法只更新界面可用状态。真正的高资源串行约束由核心服务和
         基础设施调度器保证，不能依赖按钮是否启用来维护并发安全。
@@ -506,9 +491,6 @@ class TasksPage(QWidget):
         self._selected_history_value = value
         self._has_complete_translation = False
         self._select_export_mode(value.export_mode)
-        self.reexport_output_edit.setText(
-            str(value.output_path or self._default_reexport_path(value))
-        )
 
         self.source_video_label.setText(str(value.source_video))
         self.project_id_label.setText(value.project_id)
@@ -600,85 +582,80 @@ class TasksPage(QWidget):
             return
         self.delete_requested.emit(value.project_id, str(value.workspace_dir))
 
-    def _request_reexport(self) -> None:
-        """把当前项目、导出模式和用户选择的成品路径发给主窗口。"""
+    def _request_download(self) -> None:
+        """选择下载目录，并把安全的成品路径交给主窗口。
+
+        目录选择发生在用户点击下载之后。页面只负责收集意图和做即时路径
+        校验，实际的视频复制或烧录仍由核心服务在后台完成。
+        """
 
         value = self._selected_history_value
         mode_value = self.export_mode_combo.currentData()
         if value is None or not isinstance(mode_value, str):
             return
-        output_text = self.reexport_output_edit.text().strip()
-        if not output_text:
-            QMessageBox.warning(self, "无法重新导出", "请选择成品保存位置。")
+
+        selected_directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择成品下载目录",
+            str(self._default_download_directory(value)),
+        )
+        if not selected_directory:
             return
 
-        # 后台任务可能在应用重启后运行，持久化前先消除相对路径歧义。
-        output_path = Path(output_text).resolve()
-        if not output_path.suffix:
-            output_path = output_path.with_suffix(
-                value.source_video.suffix or ".mp4"
-            )
-            self.reexport_output_edit.setText(str(output_path))
-        if output_path.exists() and output_path.is_dir():
+        # `getExistingDirectory` 正常只返回目录，这里仍保留一次本地校验，
+        # 避免测试替身或异常平台返回普通文件后把它当成父目录使用。
+        download_directory = Path(selected_directory).resolve()
+        if not download_directory.is_dir():
             QMessageBox.warning(
                 self,
-                "无法重新导出",
-                "成品保存位置必须是文件路径，不能是目录。",
+                "无法下载",
+                "请选择存在的下载目录。",
             )
             return
+
+        # 下载文件名固定追加“字幕”，即使用户选择了源视频所在目录，
+        # 最终路径也不会与源视频相同，核心导出用例还会再做一次兜底校验。
+        suffix = value.source_video.suffix or ".mp4"
+        output_path = (
+            download_directory
+            / f"{value.source_video.stem}-字幕{suffix}"
+        )
         if output_path.resolve() == value.source_video.resolve():
             QMessageBox.warning(
                 self,
-                "无法重新导出",
+                "无法下载",
                 "成品保存路径不能覆盖源视频，请使用其他文件名。",
             )
             return
-        if output_path.exists():
+        output_files = [output_path]
+        if mode_value == ExportMode.SOFT_SUBTITLE.value:
+            output_files.append(output_path.with_suffix(".srt"))
+        existing_files = [path for path in output_files if path.exists()]
+        if existing_files:
             overwrite = QMessageBox.question(
                 self,
                 "确认覆盖",
-                f"目标文件已经存在，是否覆盖？\n{output_path}",
+                "下载目录中已有同名成品，是否覆盖？\n"
+                + "\n".join(str(path) for path in existing_files),
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if overwrite != QMessageBox.StandardButton.Yes:
                 return
-        self.reexport_requested.emit(
+        self.download_requested.emit(
             value.project_id,
             mode_value,
             str(output_path),
         )
 
-    def _browse_reexport_output(self) -> None:
-        """打开文件保存对话框，为重新导出的成品选择完整路径。"""
-
-        value = self._selected_history_value
-        if value is None:
-            return
-        initial_path = self.reexport_output_edit.text().strip()
-        if not initial_path:
-            initial_path = str(self._default_reexport_path(value))
-        suffix = value.source_video.suffix or ".mp4"
-        selected_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "选择重新导出文件",
-            initial_path,
-            f"视频文件 (*{suffix});;所有文件 (*.*)",
-        )
-        if selected_path:
-            self.reexport_output_edit.setText(selected_path)
-
     @staticmethod
-    def _default_reexport_path(value: VideoTaskHistoryDTO) -> Path:
-        """为从未导出的旧项目生成不会覆盖源视频的建议路径。"""
+    def _default_download_directory(value: VideoTaskHistoryDTO) -> Path:
+        """返回下载目录选择器的建议起点，但不替用户确认保存位置。"""
 
-        suffix = value.source_video.suffix or ".mp4"
-        return (
-            value.workspace_dir
-            / "exports"
-            / f"{value.source_video.stem}-字幕{suffix}"
-        )
+        if value.output_path is not None:
+            return value.output_path.parent
+        return value.source_video.parent
 
     def _select_export_mode(self, mode_value: str) -> None:
         """让导出模式控件显示项目上次保存的选择。"""
@@ -689,7 +666,7 @@ class TasksPage(QWidget):
                 return
 
     def _sync_project_actions(self) -> None:
-        """根据当前项目状态启用恢复与重新导出操作。"""
+        """根据当前项目状态启用恢复与下载操作。"""
 
         value = self._selected_history_value
         available = (
@@ -707,9 +684,7 @@ class TasksPage(QWidget):
         )
         self.retry_button.setEnabled(bool(retryable))
         self.export_mode_combo.setEnabled(bool(exportable))
-        self.reexport_output_edit.setEnabled(bool(exportable))
-        self.reexport_browse_button.setEnabled(bool(exportable))
-        self.reexport_button.setEnabled(bool(exportable))
+        self.download_button.setEnabled(bool(exportable))
         # 删除属于项目级清理操作，不受完成、失败或运行状态限制。
         # 运行中删除的最终收尾由主窗口在后台线程退出后完成。
         self.delete_button.setEnabled(value is not None)

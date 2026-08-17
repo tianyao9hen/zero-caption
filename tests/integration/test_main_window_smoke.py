@@ -65,6 +65,83 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
     app.processEvents()
 
 
+def test_main_window_downloads_completed_translation_without_changing_source(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """下载按钮应在用户选定目录后生成新文件，并保留原视频内容。"""
+
+    # arrange：准备一个已经完成翻译的项目，下载走真实窗口信号和外挂导出器，
+    # 但不需要启动识别模型、翻译网络请求或 `FFmpeg`。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    workspace.ensure_structure()
+    container = AppContainer(
+        settings=Settings(workspace_root=workspace.root),
+        workspace=workspace,
+        logger=logging.getLogger("test-window-download"),
+        asr_hardware_info=cpu_hardware_info(),
+    )
+    source_video = tmp_path / "lesson.mp4"
+    source_content = b"original video content"
+    source_video.write_bytes(source_content)
+    project_id = "project-window-download"
+    project_dir = workspace.create_project_structure(
+        project_id,
+        "lesson-DL",
+    )
+    project = Project(
+        project_id=project_id,
+        source_video=source_video,
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=project_dir,
+    )
+    project.mark_completed()
+    container.project_repository.save(project)
+    task = Task("task-window-download", project.project_id, "translate_subtitles")
+    task.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    container.task_repository.save(task)
+    container.subtitle_repository.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    container.subtitle_repository.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    download_directory = tmp_path / "downloads"
+    download_directory.mkdir()
+    monkeypatch.setattr(
+        "ui.pages.tasks_page.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(download_directory),
+    )
+    window = container.create_main_window()
+
+    # act：通过任务页按钮发出下载请求，并等待后台导出线程结束。
+    window.navigation.set_current_page(1)
+    assert window.tasks_page.download_button.isEnabled() is True
+    window.tasks_page.download_button.click()
+    deadline = monotonic() + 3
+    while window._pipeline_runners and monotonic() < deadline:
+        app.processEvents()
+
+    # assert：新视频与字幕进入所选目录，原视频没有被覆盖或改写。
+    output_video = download_directory / "lesson-字幕.mp4"
+    output_subtitle = download_directory / "lesson-字幕.srt"
+    assert window._pipeline_runners == {}
+    assert output_video.read_bytes() == source_content
+    assert "你好" in output_subtitle.read_text(encoding="utf-8")
+    assert source_video.read_bytes() == source_content
+    assert "下载成品" in window.status_widget.label.text()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
 def test_main_window_runs_multiple_video_operations_until_capacity(
     tmp_path,
     monkeypatch,

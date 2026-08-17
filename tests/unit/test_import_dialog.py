@@ -59,13 +59,13 @@ def test_import_dialog_defaults_to_full_pipeline_when_translation_is_configured(
     # act
     request = dialog.to_request(tmp_path / "workspace")
 
-    # assert：完整模式选中后，翻译和导出控件可编辑。
+    # assert：完整模式不预先选择外部目录，下载位置留到翻译完成后决定。
     assert request.processing_mode is ProcessingMode.FULL_PIPELINE
-    assert request.output_path == (
-        tmp_path / "chosen-results" / "clip-字幕.mp4"
-    )
+    assert request.output_path is None
     assert dialog.target_language_combo.isEnabled() is True
     assert dialog.export_mode_combo.isEnabled() is True
+    assert dialog.output_directory_widget.isHidden() is True
+    assert "下载成品" in dialog.output_preview_label.text()
     dialog.deleteLater()
     app.processEvents()
 

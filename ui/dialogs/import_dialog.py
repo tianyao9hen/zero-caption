@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from core.dto.pipeline_dto import ProcessVideoInput
@@ -63,7 +64,7 @@ class ImportDialog(QDialog):
             ProcessingMode.TRANSCRIBE_ONLY,
         )
         self.processing_mode_combo.addItem(
-            "自动识别、逐句翻译并导出",
+            "自动识别并逐句翻译",
             ProcessingMode.FULL_PIPELINE,
         )
         if translation_configured:
@@ -94,7 +95,9 @@ class ImportDialog(QDialog):
         self.output_directory_button.clicked.connect(
             self._browse_output_directory
         )
-        output_directory_row = QHBoxLayout()
+        self.output_directory_widget = QWidget()
+        output_directory_row = QHBoxLayout(self.output_directory_widget)
+        output_directory_row.setContentsMargins(0, 0, 0, 0)
         output_directory_row.addWidget(self.output_directory_edit, 1)
         output_directory_row.addWidget(self.output_directory_button)
 
@@ -119,16 +122,19 @@ class ImportDialog(QDialog):
         self.output_directory_edit.textChanged.connect(
             self._sync_output_preview
         )
-        self._sync_processing_controls()
 
         form = QFormLayout()
         form.addRow(QLabel("视频文件"), video_row)
         form.addRow(QLabel("任务类型"), self.processing_mode_combo)
         form.addRow(QLabel("源语言"), self.source_language_combo)
         form.addRow(QLabel("目标语言"), self.target_language_combo)
-        form.addRow(QLabel("导出模式"), self.export_mode_combo)
+        form.addRow(QLabel("下载模式"), self.export_mode_combo)
         form.addRow(QLabel("翻译上下文"), self.context_edit)
-        form.addRow(QLabel("成果保存目录"), output_directory_row)
+        self.output_directory_label = QLabel("字幕保存目录")
+        form.addRow(
+            self.output_directory_label,
+            self.output_directory_widget,
+        )
         form.addRow(QLabel("将生成"), self.output_preview_label)
         form.addRow(QLabel("本次识别配置"), self.asr_runtime_label)
         form.addRow(QLabel("说明"), self.processing_hint_label)
@@ -144,6 +150,9 @@ class ImportDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
+        # 依赖的标签和行容器全部创建完成后再同步一次初始模式，避免构造阶段
+        # 访问尚不存在的控件；后续切换仍由上面的信号连接自动处理。
+        self._sync_processing_controls()
 
     def _browse_video(self) -> None:
         """打开系统文件选择器，把用户选择的路径填入表单。"""
@@ -186,34 +195,44 @@ class ImportDialog(QDialog):
             QMessageBox.warning(self, "无法导入", "请选择存在的本地视频文件。")
             return
 
-        output_directory_text = self.output_directory_edit.text().strip()
-        if not output_directory_text:
-            QMessageBox.warning(self, "无法创建任务", "请选择成果保存目录。")
-            return
-        output_directory = Path(output_directory_text).resolve()
-        if output_directory.exists() and not output_directory.is_dir():
-            QMessageBox.warning(
-                self,
-                "无法创建任务",
-                "成果保存位置必须是目录，不能是已有文件。",
-            )
-            return
-
-        output_path = self.output_path()
-        if output_path is None:
-            QMessageBox.warning(self, "无法创建任务", "无法生成成果文件路径。")
-            return
-        if output_path.exists():
-            overwrite = QMessageBox.question(
-                self,
-                "确认覆盖",
-                f"目标文件已经存在，是否覆盖？\n{output_path}",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if overwrite != QMessageBox.StandardButton.Yes:
+        processing_mode = ProcessingMode(
+            self.processing_mode_combo.currentData()
+        )
+        # 完整流程只写项目工作区，外部下载目录会在翻译完成后再由用户选择。
+        # 仅识别模式仍需在提交前确认原文字幕的保存位置。
+        if processing_mode is ProcessingMode.TRANSCRIBE_ONLY:
+            output_directory_text = self.output_directory_edit.text().strip()
+            if not output_directory_text:
+                QMessageBox.warning(self, "无法创建任务", "请选择字幕保存目录。")
                 return
+            output_directory = Path(output_directory_text).resolve()
+            if output_directory.exists() and not output_directory.is_dir():
+                QMessageBox.warning(
+                    self,
+                    "无法创建任务",
+                    "字幕保存位置必须是目录，不能是已有文件。",
+                )
+                return
+
+            output_path = self.output_path()
+            if output_path is None:
+                QMessageBox.warning(
+                    self,
+                    "无法创建任务",
+                    "无法生成字幕文件路径。",
+                )
+                return
+            if output_path.exists():
+                overwrite = QMessageBox.question(
+                    self,
+                    "确认覆盖",
+                    f"目标文件已经存在，是否覆盖？\n{output_path}",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if overwrite != QMessageBox.StandardButton.Yes:
+                    return
         self.accept()
 
     def _sync_processing_controls(self) -> None:
@@ -226,10 +245,12 @@ class ImportDialog(QDialog):
         self.target_language_combo.setEnabled(full_pipeline)
         self.export_mode_combo.setEnabled(full_pipeline)
         self.context_edit.setEnabled(full_pipeline)
+        self.output_directory_label.setVisible(not full_pipeline)
+        self.output_directory_widget.setVisible(not full_pipeline)
         if full_pipeline:
             self.processing_hint_label.setText(
-                "创建后会在后台依次执行识别、逐句翻译和导出；"
-                "完整流程需要可用的大模型配置。"
+                "创建后会在后台依次执行识别和逐句翻译；翻译完成后，"
+                "请在任务页点击“下载成品”并选择保存目录。"
             )
         else:
             self.processing_hint_label.setText(
@@ -241,9 +262,8 @@ class ImportDialog(QDialog):
     def output_path(self) -> Path | None:
         """根据任务类型返回用户可见主要成果的完整路径。
 
-        仅识别任务生成与源视频同名的 `.srt`；完整流程为了避免覆盖
-        源视频，会在文件名后增加“字幕”。外挂模式还会由导出器在同一
-        目录生成同名 `.srt` 文件。
+        仅识别任务生成与源视频同名的 `.srt`。完整流程返回空值，因为
+        翻译完成前不会写入用户目录；视频路径在点击“下载成品”后确定。
         """
 
         source_text = self.video_edit.text().strip()
@@ -260,32 +280,24 @@ class ImportDialog(QDialog):
         )
         if processing_mode is ProcessingMode.TRANSCRIBE_ONLY:
             return output_directory / f"{source_path.stem}.srt"
-
-        suffix = source_path.suffix or ".mp4"
-        return output_directory / f"{source_path.stem}-字幕{suffix}"
+        return None
 
     def _sync_output_preview(self) -> None:
         """实时展示将写出的用户成果，避免目录选择含义不清。"""
 
         output_path = self.output_path()
-        if output_path is None:
-            self.output_preview_label.setText("选择视频和保存目录后显示成果路径")
-            return
-
         processing_mode = ProcessingMode(
             self.processing_mode_combo.currentData()
         )
-        if processing_mode is ProcessingMode.TRANSCRIBE_ONLY:
-            self.output_preview_label.setText(str(output_path))
-            return
-
-        export_mode = ExportMode(self.export_mode_combo.currentData())
-        if export_mode is ExportMode.SOFT_SUBTITLE:
+        if processing_mode is ProcessingMode.FULL_PIPELINE:
             self.output_preview_label.setText(
-                f"视频：{output_path}\n字幕：{output_path.with_suffix('.srt')}"
+                "译文字幕保存在项目中；完成后由“下载成品”选择目录"
             )
-        else:
-            self.output_preview_label.setText(f"烧录字幕视频：{output_path}")
+            return
+        if output_path is None:
+            self.output_preview_label.setText("选择视频和保存目录后显示字幕路径")
+            return
+        self.output_preview_label.setText(str(output_path))
 
     def to_request(self, workspace_dir: Path) -> ProcessVideoInput:
         """把已确认表单转换成核心层处理请求。"""

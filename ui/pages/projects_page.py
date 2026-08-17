@@ -48,7 +48,7 @@ class ProjectsPage(QWidget):
         form.addRow("工作区", self.workspace_label)
         form.addRow("识别音频", self.audio_label)
         form.addRow("字幕文件", self.subtitle_label)
-        form.addRow("最近导出", self.output_label)
+        form.addRow("最近下载", self.output_label)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -65,7 +65,7 @@ class ProjectsPage(QWidget):
         self.audio_label.setText(str(result.transcription.audio_path or "-"))
         self.subtitle_label.setText(str(result.subtitle_path or "-"))
         if result.export is None:
-            self.output_label.setText("未执行视频导出")
+            self.output_label.setText("等待用户下载")
         else:
             self.output_label.setText(str(result.export.export_record.output_path))
 

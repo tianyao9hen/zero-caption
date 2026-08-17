@@ -50,6 +50,13 @@ def test_settings_page_masks_key_and_emits_edited_translation_settings(
     emitted: list[EngineSettings] = []
     page.save_requested.connect(emitted.append)
 
+    # 设置页首次打开就应展示内置提示词，同时保留普通文本编辑能力。
+    assert (
+        page.system_prompt_field.toPlainText()
+        == TranslationSettings().system_prompt
+    )
+    assert page.system_prompt_field.isReadOnly() is False
+
     # act：连续修改多项设置，计时器应只提交用户停止编辑后的最后一份值。
     page.base_url_field.setText("https://new.example/v1")
     page.model_field.setText("new-model")

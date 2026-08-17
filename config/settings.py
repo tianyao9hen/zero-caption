@@ -49,9 +49,8 @@ class TranslationSettings:
     api_key: str = field(default="", repr=False)
     api_key_env: str = "OPENAI_API_KEY"
     system_prompt: str = (
-        "你是一名专业字幕翻译器。请忠实、自然、简洁地翻译字幕，不添加解释。"
-        "调用方每次只提供一条字幕；请只返回 JSON 数组，数组中包含一个对象，"
-        "原样保留 id，并在 text 字段中给出译文。不要使用 Markdown 代码块。"
+        "你是一名专业字幕翻译器。请忠实、自然、简洁地翻译字幕，"
+        "保持人物语气和上下文一致，不添加原文没有的信息。"
     )
     timeout_seconds: float = 60.0
     max_retries: int = 2
@@ -366,6 +365,16 @@ def _settings_from_data(data: dict[str, Any]) -> Settings:
     translation = engine.get("translation", {})
     export = engine.get("export", {})
 
+    # 卸载软件时用户可以选择保留本机设置，重装后就可能继续读到旧版本写入的
+    # 空提示词。空白内容无法执行翻译，也不应覆盖新版随包提供的可用默认值；
+    # 非空内容仍原样保留，因此用户在设置页编辑的自定义提示词不会丢失。
+    system_prompt = translation.get(
+        "system_prompt",
+        settings.engine.translation.system_prompt,
+    )
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        system_prompt = settings.engine.translation.system_prompt
+
     # 第三步：组装结构化 `Settings`。
     # 这里刻意显式写出每个字段，而不是偷懒直接把字典展开，
     # 是为了让字段默认值、类型转换和配置名保持清晰可见。
@@ -401,10 +410,7 @@ def _settings_from_data(data: dict[str, Any]) -> Settings:
                 model=translation.get("model", settings.engine.translation.model),
                 api_key=translation.get("api_key", settings.engine.translation.api_key),
                 api_key_env=translation.get("api_key_env", settings.engine.translation.api_key_env),
-                system_prompt=translation.get(
-                    "system_prompt",
-                    settings.engine.translation.system_prompt,
-                ),
+                system_prompt=system_prompt,
                 timeout_seconds=float(
                     translation.get(
                         "timeout_seconds",

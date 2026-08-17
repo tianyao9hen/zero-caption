@@ -1,6 +1,6 @@
 """面向任务的应用服务模块。
 
-这个服务紧贴 `core` 层。UI 通过它发起视频处理、恢复、重新导出和字幕
+这个服务紧贴 `core` 层。UI 通过它发起视频处理、恢复、成品下载和字幕
 修订，并查询持久化状态，而不是直接操作队列、仓储或基础设施适配器。
 """
 
@@ -129,7 +129,7 @@ class TaskService:
         self,
         request: ReexportProjectInput,
     ) -> ExportVideoResult:
-        """在受控的高资源槽位中使用当前译文重新导出视频。"""
+        """在受控的高资源槽位中使用当前译文生成下载视频。"""
 
         usecase = self._require_usecase(self.reexport_project_usecase)
         result = self._run_resource_limited(
@@ -216,7 +216,7 @@ class TaskService:
         """按请求模式执行本地识别或完整字幕处理流程。
 
         这个方法是 UI 和命令行入口共享的核心编排入口。
-        调用方只提交一个结构化请求，具体步骤仍由四个独立用例负责，
+        调用方只提交一个结构化请求，具体步骤仍由独立用例负责，
         因此页面层不需要复制主链路顺序或处理失败状态。
         """
 
@@ -230,7 +230,13 @@ class TaskService:
                 translation_context=(request.context or "").strip(),
                 processing_mode=request.processing_mode,
                 export_mode=request.export_mode,
-                output_path=request.output_path,
+                # 完整流程先把译文保存在项目工作区，用户稍后点击“下载成品”
+                # 才选择外部目录。只有“仅识别”任务需要在创建时保存目标路径。
+                output_path=(
+                    request.output_path
+                    if request.processing_mode is ProcessingMode.TRANSCRIBE_ONLY
+                    else None
+                ),
             )
         )
 
@@ -304,15 +310,15 @@ class TaskService:
         created: CreateProjectResult,
         request: ProcessVideoInput,
     ) -> ProcessVideoResult:
-        """在已经存在的项目上继续识别、翻译和导出步骤。"""
+        """在已经存在的项目上继续识别和翻译步骤。"""
 
         # 第二步：本地探测、抽音频、识别并写出原文字幕。
         transcription = self.transcribe_video(
             TranscribeVideoInput(
                 project_id=created.project.project_id,
                 # 仅识别任务的主要成果就是原文字幕，因此把用户选择的
-                # `.srt` 路径交给识别用例。完整流程的同一字段表示视频
-                # 成品路径，不能在这里误当成字幕路径。
+                # `.srt` 路径交给识别用例。完整流程不预先写用户目录，
+                # 因此不能在这里误把兼容字段当成字幕路径。
                 output_path=(
                     request.output_path
                     if request.processing_mode is ProcessingMode.TRANSCRIBE_ONLY
@@ -354,37 +360,27 @@ class TaskService:
         if translation.subtitle_path is None:
             raise RuntimeError("翻译完成后没有生成正式字幕文件。")
 
-        # 第四步：默认把成品放到项目 exports 目录，调用方也可以显式指定路径。
-        output_path = request.output_path
-        if output_path is None:
-            output_path = (
-                created.project.workspace_dir
-                / "exports"
-                / request.source_video.name
-            )
-        created.project.output_path = output_path
-        created.project.export_mode = request.export_mode
-        created.project.translation_context = (request.context or "").strip()
-        created.project.touch()
-        # 完整桌面装配会注入项目仓储，从而在导出前保存恢复参数。
-        # 少量只验证用例顺序的轻量测试没有查询依赖，仍可依靠同一个内存实体
-        # 继续执行，不应为此强制它们装配与测试目标无关的仓储入口。
+        # 第四步：译文字幕是自动处理流程的最终产物。此处只完成项目状态，
+        # 不再自动复制或改写视频；用户稍后从任务页点击“下载成品”时，才会
+        # 选择外部目录并显式调用导出用例。这样源视频始终只作为只读输入。
+        project = created.project
         if self.project_repository is not None:
-            self.project_repository.save(created.project)
-        export = self.export_video(
-            ExportVideoInput(
-                project_id=created.project.project_id,
-                source_video=request.source_video,
-                subtitle_path=translation.subtitle_path,
-                output_path=output_path,
-                mode=request.export_mode,
+            persisted_project = self.project_repository.get_by_id(
+                created.project.project_id
             )
-        )
+            if persisted_project is None:
+                raise RuntimeError("翻译完成后无法读取项目记录。")
+            project = persisted_project
+        project.export_mode = request.export_mode
+        project.translation_context = (request.context or "").strip()
+        project.mark_completed()
+        if self.project_repository is not None:
+            self.project_repository.save(project)
+        created.project = project
         return ProcessVideoResult(
             project=created,
             transcription=transcription,
             translation=translation,
-            export=export,
         )
 
     def list_video_tasks(self, limit: int = 50) -> list[VideoTaskHistoryDTO]:

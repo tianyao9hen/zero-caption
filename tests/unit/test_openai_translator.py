@@ -12,8 +12,14 @@ import pytest
 
 from core.dto.subtitle_dto import SubtitleSegmentDTO
 from infrastructure.translation.batch_builder import TranslationBatchBuilder
-from infrastructure.translation.base import TranslationConfigurationError
-from infrastructure.translation.openai_translator import OpenAICompatibleTranslator
+from infrastructure.translation.base import (
+    TranslationConfigurationError,
+    TranslationResponseError,
+)
+from infrastructure.translation.openai_translator import (
+    OpenAICompatibleTranslator,
+    TRANSLATION_RESPONSE_CONTRACT,
+)
 
 
 def _segments() -> list[SubtitleSegmentDTO]:
@@ -28,17 +34,19 @@ def _segments() -> list[SubtitleSegmentDTO]:
 def test_translator_sends_only_text_and_language_context(monkeypatch) -> None:
     """翻译请求不应包含视频路径等媒体信息，并应正确回填时间轴。"""
 
-    # arrange：传输假实现检查适配器送出的结构并返回 JSON 数组。
+    # arrange：传输假实现检查适配器送出的结构并返回标准 JSON 对象。
     monkeypatch.setenv("TEST_TRANSLATION_KEY", "secret-value")
     requests: list[tuple[str, dict[str, str], dict[str, object], float]] = []
 
     def transport(endpoint, headers, payload, timeout):
         requests.append((endpoint, headers, payload, timeout))
         content = json.dumps(
-            [
-                {"id": "seg-1", "text": "你好"},
-                {"id": "seg-2", "text": "世界"},
-            ],
+            {
+                "translations": [
+                    {"id": "seg-1", "text": "你好"},
+                    {"id": "seg-2", "text": "世界"},
+                ]
+            },
             ensure_ascii=False,
         )
         return {"choices": [{"message": {"content": content}}]}
@@ -59,7 +67,12 @@ def test_translator_sends_only_text_and_language_context(monkeypatch) -> None:
     assert requests[0][0] == "https://translation.example/v1/chat/completions"
     assert requests[0][1]["Authorization"] == "Bearer secret-value"
     assert requests[0][2]["enable_thinking"] is False
-    assert requests[0][2]["messages"][0]["content"] == "自定义字幕系统提示词"  # type: ignore[index]
+    assert requests[0][2]["response_format"] == {"type": "json_object"}
+    assert requests[0][2]["max_tokens"] >= 512
+    system_content = requests[0][2]["messages"][0]["content"]  # type: ignore[index]
+    assert system_content.startswith("自定义字幕系统提示词")
+    assert TRANSLATION_RESPONSE_CONTRACT in system_content
+    assert '"translations"' in system_content
     user_content = requests[0][2]["messages"][1]["content"]  # type: ignore[index]
     request_data = json.loads(user_content)
     assert request_data["source_language"] == "ja-JP"
@@ -68,6 +81,57 @@ def test_translator_sends_only_text_and_language_context(monkeypatch) -> None:
     assert "source_video" not in request_data
     assert [segment.text for segment in result] == ["你好", "世界"]
     assert [(segment.start_ms, segment.end_ms) for segment in result] == [(0, 1_000), (1_000, 2_000)]
+
+
+def test_translator_accepts_legacy_single_object_response(monkeypatch) -> None:
+    """旧提示词诱导模型返回单对象时，单句翻译仍应可靠回填本地字幕编号。"""
+
+    # arrange：这个格式来自旧提示词中“要求数组、示例却是对象”的历史冲突。
+    monkeypatch.setenv("TEST_TRANSLATION_KEY", "secret-value")
+
+    def transport(endpoint, headers, payload, timeout):
+        return {"choices": [{"message": {"content": '{"text":"你好"}'}}]}
+
+    translator = OpenAICompatibleTranslator(
+        base_url="https://translation.example/v1",
+        model="test-model",
+        api_key_env="TEST_TRANSLATION_KEY",
+        transport=transport,
+    )
+
+    # act：响应没有 id，但当前批次只有一条字幕，因此可以使用本地稳定编号补齐。
+    result = translator.translate_segments([_segments()[0]], "ja-JP", "zh-CN")
+
+    # assert：只兼容响应结构，不采信远程时间轴或其他业务字段。
+    assert result[0].segment_id == "seg-1"
+    assert result[0].text == "你好"
+    assert result[0].start_ms == 0
+
+
+def test_translator_includes_raw_model_content_in_format_error(monkeypatch) -> None:
+    """响应结构错误时，用户应能在异常信息中看到模型实际返回的正文。"""
+
+    # arrange：模拟模型忽略 JSON 协议，直接返回一段自然语言说明。
+    monkeypatch.setenv("TEST_TRANSLATION_KEY", "secret-value")
+    raw_content = "我已经完成翻译，结果是：你好"
+
+    def transport(endpoint, headers, payload, timeout):
+        return {"choices": [{"message": {"content": raw_content}}]}
+
+    translator = OpenAICompatibleTranslator(
+        base_url="https://translation.example/v1",
+        model="test-model",
+        api_key_env="TEST_TRANSLATION_KEY",
+        transport=transport,
+    )
+
+    # act / assert：既保留稳定错误原因，也附带原始正文供用户自行判断。
+    with pytest.raises(TranslationResponseError) as exc_info:
+        translator.translate_segments([_segments()[0]], "ja-JP", "zh-CN")
+
+    assert "翻译服务返回内容无法解析。" in str(exc_info.value)
+    assert "大模型原始返回：" in str(exc_info.value)
+    assert raw_content in str(exc_info.value)
 
 
 def test_translator_prefers_api_key_configured_in_application(monkeypatch) -> None:
