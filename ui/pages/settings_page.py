@@ -384,8 +384,19 @@ class SettingsPage(QWidget):
         self.system_prompt_field.setObjectName("translationSystemPromptField")
         self.system_prompt_field.setPlaceholderText("输入翻译规则和返回格式要求")
         self.system_prompt_field.setMinimumHeight(110)
+
+        self.reset_system_prompt_button = QPushButton("重置为默认提示词")
+        self.reset_system_prompt_button.setObjectName(
+            "resetTranslationSystemPromptButton"
+        )
+        self.reset_system_prompt_button.clicked.connect(self._reset_system_prompt)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch(1)
+        button_layout.addWidget(self.reset_system_prompt_button)
         layout.addWidget(description)
         layout.addWidget(self.system_prompt_field)
+        layout.addLayout(button_layout)
         return group
 
     def _build_model_test_group(self) -> QGroupBox:
@@ -504,6 +515,16 @@ class SettingsPage(QWidget):
         self.cpu_fallback_check.setChecked(True)
         self.feedback_label.setStyleSheet("color: #315a8a;")
         self.feedback_label.setText("已应用推荐值，正在等待自动保存。")
+
+    def _reset_system_prompt(self) -> None:
+        """恢复内置翻译提示词，并保留文本框的普通编辑能力。
+
+        默认值来自 `TranslationSettings`，避免设置页复制一份容易过期的提示词。
+        `setPlainText` 会触发现有自动保存信号，用户也可以在重置后继续修改内容。
+        """
+
+        self.system_prompt_field.setPlainText(TranslationSettings().system_prompt)
+        self.system_prompt_field.setFocus()
 
     def _sync_asr_compute_selection(self) -> None:
         """CPU 模式下把不受支持的半精度组合规整为 `int8`。"""
