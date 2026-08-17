@@ -129,3 +129,19 @@ def test_release_bundle_includes_cuda_runtime_libraries() -> None:
     assert 'collect_dynamic_libs("nvidia.cublas")' in spec
     assert "cublas64_12.dll" in verifier
     assert "cublasLt64_12.dll" in verifier
+
+
+def test_application_logo_is_used_by_executable_and_installer() -> None:
+    """桌面程序与安装器应使用同一份多尺寸 Windows 图标。"""
+
+    icon_path = PROJECT_ROOT / "resources" / "icons" / "zero-caption.ico"
+    logo_path = PROJECT_ROOT / "resources" / "icons" / "zero-caption-logo.png"
+    spec = (PROJECT_ROOT / "ZeroCaption.spec").read_text(encoding="utf-8-sig")
+    manifest = (PROJECT_ROOT / "installer" / "ZeroCaption.iss").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert icon_path.is_file()
+    assert logo_path.is_file()
+    assert '"resources" / "icons" / "zero-caption.ico"' in spec
+    assert "SetupIconFile=..\\resources\\icons\\zero-caption.ico" in manifest

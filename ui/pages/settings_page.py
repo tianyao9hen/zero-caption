@@ -7,11 +7,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -35,6 +38,7 @@ class SettingsPage(QWidget):
     # `Signal` 是 Qt 的事件通知机制。这里传递普通 Python 对象，
     # 让页面只负责收集输入，而不需要知道配置最终写到哪个目录。
     save_requested = Signal(object)
+    workspace_change_requested = Signal(object)
     test_requested = Signal(object, str)
 
     def __init__(
@@ -123,6 +127,19 @@ class SettingsPage(QWidget):
             export=self.export_settings,
         )
 
+    def workspace_path(self) -> Path:
+        """读取用户填写的工作区路径；空值会作为输入错误报告。"""
+
+        value = self.workspace_field.text().strip()
+        if not value:
+            raise ValueError("工作区路径不能为空。")
+        return Path(value).expanduser()
+
+    def apply_saved_workspace(self, workspace_root: str | Path) -> None:
+        """工作区切换成功后，把实际生效的绝对路径同步回输入框。"""
+
+        self.workspace_field.setText(str(workspace_root))
+
     def apply_saved_engine_settings(self, settings: EngineSettings) -> None:
         """保存成功后同步表单，确保展示的是实际生效配置。"""
 
@@ -162,12 +179,40 @@ class SettingsPage(QWidget):
         settings: Settings,
         hardware_info: AsrHardwareInfoDTO,
     ) -> QGroupBox:
-        """创建只读的本地运行信息分组。"""
+        """创建可选择工作区以及只读运行能力信息的分组。"""
 
         group = QGroupBox("本地运行")
         form = self._new_form_layout()
+
+        # 工作区是本组唯一可编辑的运行设置。输入框允许粘贴路径，
+        # “选择文件夹”按钮为不熟悉 Windows 路径的用户提供原生目录选择器。
+        self.workspace_field = QLineEdit(str(settings.workspace_root))
+        self.workspace_field.setObjectName("workspacePathField")
+        self.workspace_field.setClearButtonEnabled(True)
+        self.workspace_field.setPlaceholderText("请选择用于保存项目数据的文件夹")
+        self.workspace_field.returnPressed.connect(
+            self._emit_workspace_change_requested
+        )
+        self.fields["工作区"] = self.workspace_field
+
+        self.workspace_browse_button = QPushButton("选择文件夹")
+        self.workspace_browse_button.setObjectName("browseWorkspaceButton")
+        self.workspace_browse_button.clicked.connect(self._browse_workspace)
+
+        self.workspace_apply_button = QPushButton("应用")
+        self.workspace_apply_button.setObjectName("applyWorkspaceButton")
+        self.workspace_apply_button.clicked.connect(
+            self._emit_workspace_change_requested
+        )
+
+        workspace_layout = QHBoxLayout()
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.addWidget(self.workspace_field, 1)
+        workspace_layout.addWidget(self.workspace_browse_button)
+        workspace_layout.addWidget(self.workspace_apply_button)
+        form.addRow("工作区", workspace_layout)
+
         values = {
-            "工作区": settings.workspace_root,
             "识别引擎": settings.engine.asr.provider,
             "CUDA 状态": "可用" if hardware_info.cuda_available else "不可用",
             "显卡": hardware_info.gpu_name,
@@ -187,6 +232,34 @@ class SettingsPage(QWidget):
             form.addRow(name, field)
         group.setLayout(form)
         return group
+
+    def _browse_workspace(self) -> None:
+        """打开系统文件夹选择器，并把选中目录填入工作区输入框。"""
+
+        current_value = self.workspace_field.text().strip()
+        start_path = Path(current_value).expanduser() if current_value else Path.home()
+        if not start_path.is_dir():
+            start_path = start_path.parent
+
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "选择 Zero Caption 工作区",
+            str(start_path),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if selected:
+            self.workspace_field.setText(selected)
+
+    def _emit_workspace_change_requested(self) -> None:
+        """校验工作区输入，并把切换动作交给主窗口编排。"""
+
+        try:
+            workspace_root = self.workspace_path()
+        except ValueError as exc:
+            self.show_save_result(False, str(exc))
+            return
+        self.feedback_label.clear()
+        self.workspace_change_requested.emit(workspace_root)
 
     def _build_asr_group(self, settings: AsrSettings) -> QGroupBox:
         """创建本地识别模型、设备、精度和回退设置。"""

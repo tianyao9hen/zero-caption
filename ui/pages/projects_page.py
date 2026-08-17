@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFormLayout, QLabel, QVBoxLayout, QWidget
 
@@ -66,3 +68,8 @@ class ProjectsPage(QWidget):
             self.output_label.setText("未执行视频导出")
         else:
             self.output_label.setText(str(result.export.export_record.output_path))
+
+    def show_workspace_root(self, workspace_root: str | Path) -> None:
+        """工作区切换后显示新的根目录，避免页面继续展示旧地址。"""
+
+        self.workspace_label.setText(str(workspace_root))

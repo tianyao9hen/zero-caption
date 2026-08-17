@@ -7,5 +7,6 @@ bundled_models = ["small", "medium"]
 allow_cpu_fallback = true
 
 [task]
-max_concurrency = 1
+max_concurrency = 2
+max_heavy_concurrency = 1
 max_retries = 2

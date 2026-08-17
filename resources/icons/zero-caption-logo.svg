@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Zero Caption 的品牌图形源文件。
+  圆角方块适配 Windows 应用图标，字幕气泡与字母 Z 共同表达“视频字幕”。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">Zero Caption 标志</title>
+  <desc id="description">深蓝圆角方块中包含青色字幕气泡与深蓝色字母 Z</desc>
+
+  <!-- 图形外部保持透明，让系统可以在不同壁纸和主题上自然显示圆角。 -->
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="#0B1220"/>
+
+  <!-- 气泡尾部朝向右下，既像字幕对话框，也保留鲜明的不对称轮廓。 -->
+  <path
+    fill="#22D3EE"
+    d="M258 248h508c72 0 130 58 130 130v250c0 72-58 130-130 130H602L444 862V758H258c-72 0-130-58-130-130V378c0-72 58-130 130-130Z"
+  />
+
+  <!-- 一条连续粗线组成字母 Z；圆角端点在小尺寸任务栏图标中仍然清楚。 -->
+  <path
+    d="M326 390h388L310 616h404"
+    fill="none"
+    stroke="#0B1220"
+    stroke-width="92"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

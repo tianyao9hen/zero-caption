@@ -1,6 +1,6 @@
 """设置页面单元测试。
 
-这些测试只验证界面输入、密钥遮蔽和信号数据，不访问磁盘或翻译服务。
+这些测试只验证界面输入、工作区选择、密钥遮蔽和信号数据，不访问翻译服务。
 配置持久化由配置层测试单独保护。
 """
 
@@ -101,6 +101,39 @@ def test_settings_page_applies_detected_gpu_recommendation(monkeypatch) -> None:
     assert page.asr_compute_combo.currentData() == "float16"
     assert page.cpu_fallback_check.isChecked() is True
     assert emitted == []
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_settings_page_selects_and_emits_workspace_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """文件夹选择器应填入路径，点击应用后再发出工作区切换请求。"""
+
+    # arrange：用临时目录替代系统对话框返回值，测试不会真的打开模态窗口。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    selected_workspace = tmp_path / "selected-workspace"
+    selected_workspace.mkdir()
+    monkeypatch.setattr(
+        "ui.pages.settings_page.QFileDialog.getExistingDirectory",
+        lambda *args: str(selected_workspace),
+    )
+    page = SettingsPage(Settings(), gpu_hardware_info())
+    emitted = []
+    page.workspace_change_requested.connect(emitted.append)
+
+    # act：选择按钮只填写路径，用户点击“应用”后才真正请求切换。
+    page.workspace_browse_button.click()
+    assert page.workspace_field.text() == str(selected_workspace)
+    assert emitted == []
+    page.workspace_apply_button.click()
+    app.processEvents()
+
+    # assert：路径输入框允许编辑，信号使用 `Path` 保留明确的路径语义。
+    assert page.workspace_field.isReadOnly() is False
+    assert emitted == [selected_workspace]
     page.deleteLater()
     app.processEvents()
 

@@ -1,16 +1,19 @@
 """主窗口构造烟测，保护启动装配和页面栈不会在创建时崩溃。"""
 
 import logging
+from pathlib import Path
+from threading import Event, Lock
 from time import monotonic
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.container import AppContainer
-from config.settings import EngineSettings, Settings
+from config.settings import EngineSettings, RuntimeSettings, Settings, TaskSettings
 from core.domain.entities import Project, Task
 from core.domain.enums import TaskCheckpoint
 from core.dto.asr_dto import AsrHardwareInfoDTO
 from core.dto.subtitle_dto import SubtitleSegmentDTO
+from infrastructure.logging.setup import configure_logging
 from infrastructure.storage.workspace import WorkspaceManager
 
 
@@ -41,10 +44,13 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
 
     # assert：窗口标题、尺寸和核心页面对象均已创建。
     assert window.windowTitle() == "Zero Caption"
+    assert window.windowIcon().isNull() is False
+    assert window.brand_logo.pixmap().isNull() is False
     assert window.size().width() == 1200
     assert window.projects_page is not None
     assert window.tasks_page is not None
     assert window.navigation.projects_button.isChecked() is True
+    assert window.task_service.resource_scheduler is container.resource_scheduler
 
     # act：程序化切换任务工作区时，页面栈和导航选中状态应同步。
     window.navigation.set_current_page(1)
@@ -53,6 +59,72 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
     assert window.stack.currentWidget() is window.tasks_page
     assert window.navigation.tasks_button.isChecked() is True
     assert window.tasks_page.create_task_button.text() == "创建视频任务"
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_main_window_runs_multiple_video_operations_until_capacity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """主窗口应同时保留多个视频线程，并在任一完成后重新开放入口。"""
+
+    # arrange：两个操作都等待同一个事件，确保断言时线程仍处于运行状态。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    workspace.ensure_structure()
+    settings = Settings(
+        workspace_root=workspace.root,
+        task=TaskSettings(max_concurrency=2, max_heavy_concurrency=1),
+    )
+    container = AppContainer(
+        settings=settings,
+        workspace=workspace,
+        logger=logging.getLogger("test-multiple-video-operations"),
+        asr_hardware_info=cpu_hardware_info(),
+    )
+    window = container.create_main_window()
+    release_operations = Event()
+    both_started = Event()
+    count_lock = Lock()
+    started_count = 0
+
+    def operation() -> object:
+        """记录线程已经启动，然后等待测试统一放行。"""
+
+        nonlocal started_count
+        with count_lock:
+            started_count += 1
+            if started_count == 2:
+                both_started.set()
+        release_operations.wait(timeout=3)
+        return object()
+
+    # act：连续提交两个视频级操作，不等待第一个结束。
+    assert window._start_project_operation(operation, lambda _result: None, "任务一")
+    assert window._start_project_operation(operation, lambda _result: None, "任务二")
+    deadline = monotonic() + 3
+    while not both_started.is_set() and monotonic() < deadline:
+        app.processEvents()
+
+    # assert：两个线程同时存活，容量已满时两个创建入口都暂停。
+    assert both_started.is_set() is True
+    assert len(window._pipeline_runners) == 2
+    assert window.tasks_page.concurrency_label.text() == "后台任务 2/2"
+    assert window.tasks_page.create_task_button.isEnabled() is False
+    assert window.import_button.isEnabled() is False
+
+    # act：放行并等待两个线程释放，验证入口会自动恢复。
+    release_operations.set()
+    deadline = monotonic() + 3
+    while window._pipeline_runners and monotonic() < deadline:
+        app.processEvents()
+
+    assert window._pipeline_runners == {}
+    assert window.tasks_page.create_task_button.isEnabled() is True
+    assert window.import_button.isEnabled() is True
     window.close()
     window.deleteLater()
     app.processEvents()
@@ -113,6 +185,87 @@ def test_main_window_refreshes_task_service_after_translation_settings_save(
     window.close()
     window.deleteLater()
     app.processEvents()
+
+
+def test_main_window_switches_workspace_and_deletes_old_directory_after_confirmation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """应用工作区后应立即切换数据库，并只在用户选择“是”时删除旧目录。"""
+
+    # arrange：所有目录和配置写入都限制在临时路径，确认框固定模拟用户选择“是”。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    old_workspace = WorkspaceManager(tmp_path / "old-workspace")
+    old_workspace.ensure_structure()
+    old_root = old_workspace.root.resolve()
+    saved_roots = []
+    saved_model_caches = []
+    logger = configure_logging(
+        old_workspace.logs_dir,
+        "INFO",
+        logger=logging.getLogger("test-workspace-switch"),
+    )
+
+    def save_to_temporary_file(workspace_root, *, model_cache_dir=None):
+        saved_roots.append(workspace_root)
+        saved_model_caches.append(model_cache_dir)
+        return tmp_path / "settings.toml"
+
+    monkeypatch.setattr(
+        "app.container.save_workspace_settings",
+        save_to_temporary_file,
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args: QMessageBox.StandardButton.Yes,
+    )
+    container = AppContainer(
+        settings=Settings(
+            workspace_root=old_workspace.root,
+            runtime=RuntimeSettings(model_cache_dir=old_workspace.root / "models"),
+        ),
+        workspace=old_workspace,
+        logger=logger,
+        asr_hardware_info=cpu_hardware_info(),
+    )
+    window = container.create_main_window()
+    new_workspace = (tmp_path / "new-workspace").resolve()
+
+    # act：通过真实设置页信号完成“应用 -> 重装配 -> 删除确认”链路。
+    window.settings_page.workspace_field.setText(str(new_workspace))
+    window.settings_page.workspace_apply_button.click()
+    app.processEvents()
+
+    # assert：当前对象、数据库、页面和持久化值都指向新工作区，旧目录已经删除。
+    assert saved_roots == [new_workspace]
+    assert saved_model_caches == [new_workspace / "models"]
+    assert container.workspace.root == new_workspace
+    assert container.settings.workspace_root == new_workspace
+    assert container.settings.runtime.model_cache_dir == new_workspace / "models"
+    assert container.database.path == new_workspace / "zero_caption.sqlite3"
+    assert window.workspace.root == new_workspace
+    assert window.settings_page.workspace_field.text() == str(new_workspace)
+    assert window.projects_page.workspace_label.text() == str(new_workspace)
+    assert window.tasks_page.task_service is window.task_service
+    assert new_workspace.is_dir()
+    assert old_root.exists() is False
+    file_handlers = [
+        handler
+        for handler in logger.handlers
+        if isinstance(handler, logging.FileHandler)
+    ]
+    assert len(file_handlers) == 1
+    assert Path(file_handlers[0].baseFilename).parent == new_workspace / "logs"
+    assert "旧工作区已删除" in window.settings_page.feedback_label.text()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+    for handler in tuple(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def test_main_window_saves_selected_subtitle_edit_in_background(

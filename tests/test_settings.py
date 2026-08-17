@@ -5,13 +5,17 @@
 避免配置层和领域枚举层各说各话。
 """
 
+import pytest
+
 from config.settings import (
     AsrSettings,
     EngineSettings,
+    TaskSettings,
     TranslationSettings,
     load_settings,
     save_engine_settings,
     save_translation_settings,
+    save_workspace_settings,
 )
 from core.domain.enums import ExportMode
 
@@ -36,9 +40,21 @@ def test_load_settings_defaults_when_missing(tmp_path, monkeypatch):
     assert settings.engine.translation.api_key_env == "OPENAI_API_KEY"
     assert settings.engine.translation.api_key == ""
     assert settings.runtime.ffmpeg_path == "resources/bin/ffmpeg/ffmpeg.exe"
-    assert settings.task.max_concurrency == 1
+    assert settings.task.max_concurrency == 2
+    assert settings.task.max_heavy_concurrency == 1
     assert settings.cache.enabled is True
     assert settings.engine.export.default_mode is ExportMode.SOFT_SUBTITLE
+
+
+def test_task_settings_reject_invalid_concurrency_boundaries() -> None:
+    """并发槽位必须为正数，且高资源槽位不能多于普通任务槽位。"""
+
+    with pytest.raises(ValueError, match="视频任务并发数必须大于 0"):
+        TaskSettings(max_concurrency=0)
+    with pytest.raises(ValueError, match="高资源任务并发数必须大于 0"):
+        TaskSettings(max_heavy_concurrency=0)
+    with pytest.raises(ValueError, match="不能超过视频任务并发数"):
+        TaskSettings(max_concurrency=1, max_heavy_concurrency=2)
 
 
 def test_load_settings_reads_runtime_sections(tmp_path):
@@ -86,6 +102,7 @@ model_cache_dir = "data/models"
 
 [task]
 max_concurrency = 1
+max_heavy_concurrency = 1
 max_retries = 2
 
 [subtitle]
@@ -113,6 +130,8 @@ reuse_transcript = true
     assert settings.engine.translation.max_batch_segments == 10
     assert settings.engine.translation.max_batch_characters == 2000
     assert settings.runtime.ffmpeg_path == "resources/bin/ffmpeg/ffmpeg.exe"
+    assert settings.task.max_concurrency == 1
+    assert settings.task.max_heavy_concurrency == 1
     assert settings.task.max_retries == 2
     assert settings.cache.reuse_transcript is True
     assert settings.engine.export.default_mode is ExportMode.SOFT_SUBTITLE
@@ -261,3 +280,31 @@ def test_save_engine_settings_round_trips_asr_and_translation(tmp_path) -> None:
     assert reloaded.asr.bundled_models == ("small", "medium")
     assert reloaded.translation.model == "caption-model"
     assert reloaded.translation.api_key == "secret"
+
+
+def test_workspace_and_engine_saves_preserve_each_other(tmp_path) -> None:
+    """分别保存工作区和引擎时，不应覆盖同一文件中的另一组设置。"""
+
+    # arrange：模拟用户先切换工作区，随后又调整本地识别模型。
+    target = tmp_path / "settings.toml"
+    selected_workspace = tmp_path / "user-workspace"
+    selected_model_cache = selected_workspace / "models"
+    save_workspace_settings(
+        selected_workspace,
+        target,
+        model_cache_dir=selected_model_cache,
+    )
+    engine = EngineSettings(
+        asr=AsrSettings(model_name="medium", device="cpu", compute_type="int8"),
+        translation=TranslationSettings(system_prompt="保留工作区的测试提示词"),
+    )
+
+    # act
+    save_engine_settings(engine, target)
+    reloaded = load_settings(user_path=target)
+
+    # assert：工作区和引擎值都能从同一个用户配置文件完整恢复。
+    assert reloaded.workspace_root == selected_workspace
+    assert reloaded.runtime.model_cache_dir == selected_model_cache
+    assert reloaded.engine.asr.model_name == "medium"
+    assert reloaded.engine.translation.system_prompt == "保留工作区的测试提示词"

@@ -73,6 +73,7 @@ executable = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=str(repo_root / "resources" / "icons" / "zero-caption.ico"),
 )
 COLLECT(
     executable,

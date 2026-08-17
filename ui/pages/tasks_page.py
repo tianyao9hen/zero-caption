@@ -82,7 +82,9 @@ class TasksPage(QWidget):
         super().__init__()
         self.task_service = task_service
         self._subtitle_action_running = False
-        self._project_action_running = False
+        self._active_project_operations = 0
+        self._max_project_concurrency = 1
+        self._active_project_ids: set[str] = set()
         self._selected_history_value: VideoTaskHistoryDTO | None = None
         self._has_complete_translation = False
 
@@ -96,8 +98,14 @@ class TasksPage(QWidget):
         self.refresh_button = QPushButton("刷新")
         self.refresh_button.setObjectName("refreshVideoTasksButton")
         self.refresh_button.clicked.connect(lambda: self.refresh_history())
+        self.concurrency_label = QLabel("后台任务 0/1")
+        self.concurrency_label.setObjectName("taskConcurrencyLabel")
+        self.resource_policy_label = QLabel("识别与视频导出会自动排队串行执行")
+        self.resource_policy_label.setObjectName("taskResourcePolicyLabel")
+        self.resource_policy_label.setWordWrap(True)
         task_actions = QHBoxLayout()
         task_actions.addWidget(self.create_task_button, 1)
+        task_actions.addWidget(self.concurrency_label)
         task_actions.addWidget(self.refresh_button)
 
         self.task_list = QListWidget()
@@ -109,6 +117,7 @@ class TasksPage(QWidget):
         history_group = QGroupBox("视频任务")
         history_layout = QVBoxLayout(history_group)
         history_layout.addLayout(task_actions)
+        history_layout.addWidget(self.resource_policy_label)
         history_layout.addWidget(self.task_list, 1)
 
         # 右侧详情既显示持久化状态，也接收当前后台线程的进度事件。
@@ -330,18 +339,57 @@ class TasksPage(QWidget):
         self.subtitle_list.clear()
         self._clear_subtitle_editor()
 
-    def set_project_action_running(self, running: bool, message: str = "") -> None:
-        """切换视频级操作的忙碌状态，避免重复恢复或重复导出。"""
+    def set_project_operation_capacity(
+        self,
+        active_count: int,
+        max_concurrency: int,
+        message: str = "",
+        active_project_ids: set[str] | None = None,
+    ) -> None:
+        """显示后台视频流程用量，并在达到上限时暂停继续提交。
 
-        self._project_action_running = running
-        self.create_task_button.setEnabled(not running)
-        self.refresh_button.setEnabled(not running)
+        参数：
+            active_count：当前仍在运行的视频级后台线程数量。
+            max_concurrency：配置允许同时运行的最大视频流程数量。
+            message：可选的当前操作提示。
+            active_project_ids：正在恢复或重新导出的已有项目编号。
+
+        这个方法只更新界面可用状态。真正的高资源串行约束由核心服务和
+        基础设施调度器保证，不能依赖按钮是否启用来维护并发安全。
+        """
+
+        self._active_project_operations = max(0, active_count)
+        self._max_project_concurrency = max(1, max_concurrency)
+        self._active_project_ids = set(active_project_ids or ())
+        has_capacity = self._active_project_operations < self._max_project_concurrency
+        self.create_task_button.setEnabled(has_capacity)
+        self.concurrency_label.setText(
+            f"后台任务 {self._active_project_operations}/"
+            f"{self._max_project_concurrency}"
+        )
         if message:
             self.message_label.setText(message)
         self._sync_project_actions()
 
+    def set_project_action_running(self, running: bool, message: str = "") -> None:
+        """兼容旧调用方，把单任务忙碌状态映射到容量显示。"""
+
+        self.set_project_operation_capacity(
+            active_count=1 if running else 0,
+            max_concurrency=1,
+            message=message,
+        )
+
     def update_summary(self, summary: TaskSummaryDTO) -> None:
-        """用最新任务摘要刷新详情，并更新对应视频的列表条目。"""
+        """更新对应视频条目，仅在它被选中时刷新右侧详情。
+
+        多个任务会交错发布进度事件。未选中任务的事件只更新左侧摘要，
+        不会抢走用户正在查看或编辑的另一个视频。
+        """
+
+        item = self._upsert_live_summary(summary)
+        if item is None or self.task_list.currentItem() is not item:
+            return
 
         self.project_id_label.setText(summary.project_id or "-")
         self.task_id_label.setText(summary.task_id)
@@ -353,7 +401,6 @@ class TasksPage(QWidget):
             summary.message if summary.status == "failed" else "无"
         )
         self.progress_bar.setValue(summary.progress)
-        self._upsert_live_summary(summary)
 
     def update_translation_progress(self, progress: TranslationProgressDTO) -> None:
         """把后台刚完成的一条译文实时更新到可选择的字幕列表。"""
@@ -586,7 +633,11 @@ class TasksPage(QWidget):
         """根据当前项目状态启用恢复与重新导出操作。"""
 
         value = self._selected_history_value
-        available = value is not None and not self._project_action_running
+        available = (
+            value is not None
+            and self._active_project_operations < self._max_project_concurrency
+            and value.project_id not in self._active_project_ids
+        )
         retryable = available and (
             value.project_status == "failed" or value.task_status == "pending"
         )
@@ -731,11 +782,14 @@ class TasksPage(QWidget):
         seconds, millis = divmod(remainder, 1_000)
         return f"{minutes:02}:{seconds:02}.{millis:03}"
 
-    def _upsert_live_summary(self, summary: TaskSummaryDTO) -> None:
+    def _upsert_live_summary(
+        self,
+        summary: TaskSummaryDTO,
+    ) -> QListWidgetItem | None:
         """把当前进度合并到对应视频条目，不为每个内部步骤新增一行。"""
 
         if not summary.project_id:
-            return
+            return None
 
         item = self._find_project_item(summary.project_id)
         if item is None:
@@ -744,11 +798,11 @@ class TasksPage(QWidget):
             self.refresh_history(select_project_id=summary.project_id)
             item = self._find_project_item(summary.project_id)
             if item is None:
-                return
+                return None
 
         value = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(value, VideoTaskHistoryDTO):
-            return
+            return None
 
         revision_task_types = {
             "edit_subtitle_translation",
@@ -779,10 +833,11 @@ class TasksPage(QWidget):
             ),
         )
         item.setData(Qt.ItemDataRole.UserRole, updated)
-        self._selected_history_value = updated
         self._update_history_item_text(item, updated)
-        self.task_list.setCurrentItem(item)
-        self._sync_project_actions()
+        if self.task_list.currentItem() is item:
+            self._selected_history_value = updated
+            self._sync_project_actions()
+        return item
 
     def _find_project_item(self, project_id: str) -> QListWidgetItem | None:
         """按项目编号查找列表项，避免依赖会随排序变化的行号。"""

@@ -103,10 +103,28 @@ class RuntimeSettings:
 
 @dataclass(slots=True)
 class TaskSettings:
-    """描述后台任务执行的最小控制参数。"""
+    """描述普通视频流程和高资源阶段各自的并发边界。
 
-    max_concurrency: int = 1
+    `max_concurrency` 限制同时存在的完整视频后台线程数量；
+    `max_heavy_concurrency` 单独限制识别和视频导出等高资源步骤。
+    两层限制分开后，等待识别资源的任务仍可让其他任务继续翻译。
+    """
+
+    max_concurrency: int = 2
+    max_heavy_concurrency: int = 1
     max_retries: int = 2
+
+    def __post_init__(self) -> None:
+        """校验并发边界，避免后台线程永久等待无效的零个槽位。"""
+
+        if self.max_concurrency <= 0:
+            raise ValueError("视频任务并发数必须大于 0。")
+        if self.max_heavy_concurrency <= 0:
+            raise ValueError("高资源任务并发数必须大于 0。")
+        if self.max_heavy_concurrency > self.max_concurrency:
+            raise ValueError("高资源任务并发数不能超过视频任务并发数。")
+        if self.max_retries < 0:
+            raise ValueError("任务最大重试次数不能小于 0。")
 
 
 @dataclass(slots=True)
@@ -230,15 +248,73 @@ def save_engine_settings(
         用户只能选择已经内置的模型，不能通过界面注入任意下载地址。
     """
 
-    _validate_asr_settings(settings.asr)
-    _validate_translation_settings(settings.translation)
     target = Path(path) if path is not None else user_data_path("settings.toml")
+
+    # 引擎设置和工作区共用同一个用户配置文件。保存其中一组时先读取另一组，
+    # 避免用户稍后修改识别参数时把已经选择的工作区路径意外覆盖掉。
+    current = load_settings(user_path=target)
+    return _save_user_settings(
+        current.workspace_root,
+        settings,
+        current.runtime.model_cache_dir,
+        target,
+    )
+
+
+def save_workspace_settings(
+    workspace_root: str | Path,
+    path: str | Path | None = None,
+    *,
+    model_cache_dir: str | Path | None = None,
+) -> Path:
+    """持久化用户选择的工作区，同时保留现有引擎设置。
+
+    参数：
+        workspace_root：后续项目、缓存、日志和数据库使用的目录。
+        path：可选输出路径；生产环境默认使用当前用户配置文件。
+        model_cache_dir：可选的新模型缓存目录；不传时保留当前配置。
+
+    返回：
+        实际写入的 `TOML` 文件路径。
+
+    副作用：
+        会原子替换用户配置文件，但不会迁移或删除旧工作区内容。
+    """
+
+    target = Path(path) if path is not None else user_data_path("settings.toml")
+    current = load_settings(user_path=target)
+    effective_model_cache = (
+        current.runtime.model_cache_dir
+        if model_cache_dir is None
+        else Path(model_cache_dir)
+    )
+    return _save_user_settings(
+        Path(workspace_root),
+        current.engine,
+        effective_model_cache,
+        target,
+    )
+
+
+def _save_user_settings(
+    workspace_root: Path,
+    engine_settings: EngineSettings,
+    model_cache_dir: Path,
+    target: Path,
+) -> Path:
+    """把当前可编辑设置一次性写入用户配置文件。"""
+
+    _validate_asr_settings(engine_settings.asr)
+    _validate_translation_settings(engine_settings.translation)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    asr = settings.asr
-    translation = settings.translation
+    asr = engine_settings.asr
+    translation = engine_settings.translation
     content = "\n".join(
         [
+            "[app]",
+            f"workspace_root = {_toml_string(str(workspace_root))}",
+            "",
             "[engine.asr]",
             f"provider = {_toml_string(asr.provider)}",
             f"model_name = {_toml_string(asr.model_name)}",
@@ -257,6 +333,9 @@ def save_engine_settings(
             f"max_retries = {translation.max_retries}",
             f"max_batch_segments = {translation.max_batch_segments}",
             f"max_batch_characters = {translation.max_batch_characters}",
+            "",
+            "[runtime]",
+            f"model_cache_dir = {_toml_string(str(model_cache_dir))}",
             "",
         ]
     )
@@ -363,8 +442,16 @@ def _settings_from_data(data: dict[str, Any]) -> Settings:
             model_cache_dir=Path(runtime.get("model_cache_dir", str(settings.runtime.model_cache_dir))),
         ),
         task=TaskSettings(
-            max_concurrency=task.get("max_concurrency", settings.task.max_concurrency),
-            max_retries=task.get("max_retries", settings.task.max_retries),
+            max_concurrency=int(
+                task.get("max_concurrency", settings.task.max_concurrency)
+            ),
+            max_heavy_concurrency=int(
+                task.get(
+                    "max_heavy_concurrency",
+                    settings.task.max_heavy_concurrency,
+                )
+            ),
+            max_retries=int(task.get("max_retries", settings.task.max_retries)),
         ),
         subtitle=SubtitleSettings(
             source_language=subtitle.get("source_language", settings.subtitle.source_language),

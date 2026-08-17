@@ -33,6 +33,7 @@ from core.ports.repository import (
     SubtitleRepository,
     TaskRepository,
 )
+from core.ports.resource_scheduler import ResourceScheduler
 from core.usecases.create_project import CreateProject
 from core.usecases.export_video import ExportVideo
 from core.usecases.reexport_project import ReexportProject
@@ -54,6 +55,7 @@ class TaskService:
     project_repository: ProjectRepository | None = None
     task_repository: TaskRepository | None = None
     subtitle_repository: SubtitleRepository | None = None
+    resource_scheduler: ResourceScheduler | None = None
     _latest_task_summary: TaskSummaryDTO | None = field(default=None, init=False)
 
     def summary(self) -> str:
@@ -76,9 +78,13 @@ class TaskService:
         return result
 
     def transcribe_video(self, request: TranscribeVideoInput) -> TranscribeVideoResult:
-        """把识别请求交给核心用例。"""
+        """在受控的高资源槽位中执行本地识别用例。"""
 
-        result = self._require_usecase(self.transcribe_video_usecase).execute(request)
+        usecase = self._require_usecase(self.transcribe_video_usecase)
+        result = self._run_resource_limited(
+            "transcribe_video",
+            lambda: usecase.execute(request),
+        )
         self._remember_task(result.task)
         return result
 
@@ -93,9 +99,13 @@ class TaskService:
         return result
 
     def export_video(self, request: ExportVideoInput) -> ExportVideoResult:
-        """把导出请求交给核心用例。"""
+        """在受控的高资源槽位中执行视频导出用例。"""
 
-        result = self._require_usecase(self.export_video_usecase).execute(request)
+        usecase = self._require_usecase(self.export_video_usecase)
+        result = self._run_resource_limited(
+            "export_video",
+            lambda: usecase.execute(request),
+        )
         self._remember_task(result.task)
         return result
 
@@ -103,10 +113,12 @@ class TaskService:
         self,
         request: ReexportProjectInput,
     ) -> ExportVideoResult:
-        """使用已有项目的当前译文重新导出视频。"""
+        """在受控的高资源槽位中使用当前译文重新导出视频。"""
 
-        result = self._require_usecase(self.reexport_project_usecase).execute(
-            request
+        usecase = self._require_usecase(self.reexport_project_usecase)
+        result = self._run_resource_limited(
+            "export_video",
+            lambda: usecase.execute(request),
         )
         self._remember_task(result.task)
         return result
@@ -443,6 +455,18 @@ class TaskService:
             message=task.message,
             project_id=task.project_id,
         )
+
+    def _run_resource_limited(self, operation_name: str, operation):
+        """通过可选调度端口执行高资源步骤并透传结果或异常。
+
+        未注入调度器的轻量单元测试和脚本仍会直接执行原操作；桌面应用
+        由容器注入同一个共享调度器，使不同 `TaskService` 实例也会竞争
+        同一组资源槽位。
+        """
+
+        if self.resource_scheduler is None:
+            return operation()
+        return self.resource_scheduler.run(operation_name, operation)
 
     def _require_usecase(self, usecase):
         """确保服务在真正调用前已经拿到了对应用例。"""

@@ -18,6 +18,7 @@ from config.settings import (
     Settings,
     TranslationSettings,
     save_engine_settings,
+    save_workspace_settings,
 )
 from core.dto.asr_dto import AsrHardwareInfoDTO
 from core.ports.asr import AsrEngine
@@ -36,6 +37,7 @@ from core.usecases.transcribe_video import TranscribeVideo
 from core.usecases.translation_model_test import TranslationModelTest
 from core.usecases.translate_subtitles import TranslateSubtitles
 from infrastructure.asr import CTranslate2HardwareProbe, FasterWhisperEngine
+from infrastructure.logging.setup import configure_logging
 from infrastructure.media.ffmpeg import FFmpegAdapter
 from infrastructure.media.ffprobe import FFprobeAdapter
 from infrastructure.storage.fingerprint import Sha256FileFingerprintCalculator
@@ -49,6 +51,7 @@ from infrastructure.storage.sqlite_repositories import (
 )
 from infrastructure.task.job_queue import PersistentJobQueue
 from infrastructure.task.progress_bus import ProgressBus
+from infrastructure.task.resource_scheduler import SerialResourceScheduler
 from infrastructure.subtitle.aligner import SubtitleAligner
 from infrastructure.subtitle.formatter import SubtitleFormatter
 from infrastructure.subtitle.srt_writer import SrtWriter
@@ -79,6 +82,7 @@ class AppContainer:
     export_record_repository: ExportRecordRepository | None = None
     job_queue: PersistentJobQueue | None = None
     progress_bus: ProgressBus = field(default_factory=ProgressBus)
+    resource_scheduler: SerialResourceScheduler | None = None
     asr_hardware_info: AsrHardwareInfoDTO | None = None
 
     def __post_init__(self) -> None:
@@ -100,12 +104,20 @@ class AppContainer:
         if self.job_queue is None:
             self.job_queue = PersistentJobQueue(self.database)
 
-        # 第三步：硬件探测只读取驱动能力，不加载 Whisper 模型。
+        # 第三步：所有后续创建的任务服务共享同一个信号量调度器。
+        # 任务服务本身按视频独立创建，但识别模型和视频导出仍竞争同一组
+        # 高资源槽位，避免两个任务同时耗尽 CPU、显存或磁盘带宽。
+        if self.resource_scheduler is None:
+            self.resource_scheduler = SerialResourceScheduler(
+                self.settings.task.max_heavy_concurrency
+            )
+
+        # 第四步：硬件探测只读取驱动能力，不加载 Whisper 模型。
         # 结果作为只读 DTO 缓存，设置页和任务装配共享同一个结论。
         if self.asr_hardware_info is None:
             self.asr_hardware_info = CTranslate2HardwareProbe().probe()
 
-        # 第四步：把上次进程异常退出留下的运行中任务改成可恢复状态。
+        # 第五步：把上次进程异常退出留下的运行中任务改成可恢复状态。
         recover = getattr(self.task_repository, "recover_running_tasks", None)
         if recover is not None:
             recover()
@@ -278,6 +290,7 @@ class AppContainer:
             project_repository=self.project_repository,
             task_repository=self.task_repository,
             subtitle_repository=self.subtitle_repository,
+            resource_scheduler=self.resource_scheduler,
         )
 
     def _create_translation_adapter(
@@ -338,6 +351,97 @@ class AppContainer:
         )
         return self.settings
 
+    def update_workspace(self, workspace_root: str | Path) -> Settings:
+        """切换后续任务使用的工作区并持久化用户选择。
+
+        参数：
+            workspace_root：设置页提交的新工作区目录。
+
+        返回：
+            已经包含新绝对路径的完整应用设置。
+
+        副作用：
+            会创建工作区目录和 SQLite 数据库；路径变化时还会重新装配仓储
+            与持久化队列。旧工作区不会在这里删除，删除必须由界面再次确认。
+        """
+
+        raw_workspace_root = str(workspace_root).strip()
+        if not raw_workspace_root:
+            raise ValueError("工作区路径不能为空。")
+        target = Path(raw_workspace_root).expanduser()
+        target = target.resolve()
+        current = self.workspace.root.expanduser().resolve()
+        current_model_cache = (
+            self.settings.runtime.model_cache_dir.expanduser().resolve()
+        )
+        candidate_model_cache = current_model_cache
+
+        # 默认模型缓存位于工作区内。切换时保留它相对旧根目录的位置，
+        # 避免用户删除旧工作区后，运行配置仍引用一个已经不存在的目录。
+        if target != current and (
+            current_model_cache == current or current in current_model_cache.parents
+        ):
+            relative_model_cache = current_model_cache.relative_to(current)
+            candidate_model_cache = target / relative_model_cache
+            candidate_model_cache.mkdir(parents=True, exist_ok=True)
+
+        # 第一步：先确保新目录可写。这里失败时不修改配置或当前容器状态。
+        candidate_workspace = WorkspaceManager(target)
+        candidate_workspace.ensure_structure()
+
+        if target != current:
+            # 第二步：为新工作区准备一整套 SQLite 依赖。
+            # 所有对象先保存在局部变量中，确认初始化成功后才替换当前引用。
+            candidate_database = SQLiteDatabase(candidate_workspace.database_path)
+            candidate_project_repository = SQLiteProjectRepository(candidate_database)
+            candidate_task_repository = SQLiteTaskRepository(candidate_database)
+            candidate_subtitle_repository = SQLiteSubtitleRepository(candidate_database)
+            candidate_export_repository = SQLiteExportRecordRepository(
+                candidate_database
+            )
+            candidate_job_queue = PersistentJobQueue(candidate_database)
+
+            recover = getattr(candidate_task_repository, "recover_running_tasks", None)
+            if recover is not None:
+                recover()
+            candidate_job_queue.recover_running()
+
+        # 第三步：依赖准备成功后再写用户配置，保证下次启动仍使用同一路径。
+        save_workspace_settings(target, model_cache_dir=candidate_model_cache)
+
+        if target != current:
+            # `WorkspaceManager` 也被主窗口和项目页引用，因此保留对象身份，
+            # 只更新根路径；其他存储对象则整体切换到新数据库。
+            configure_logging(
+                candidate_workspace.logs_dir,
+                self.settings.log_level,
+                logger=self.logger,
+            )
+            self.workspace.root = target
+            self.database = candidate_database
+            self.project_repository = candidate_project_repository
+            self.task_repository = candidate_task_repository
+            self.subtitle_repository = candidate_subtitle_repository
+            self.export_record_repository = candidate_export_repository
+            self.job_queue = candidate_job_queue
+
+        self.settings = replace(
+            self.settings,
+            workspace_root=target,
+            runtime=replace(
+                self.settings.runtime,
+                model_cache_dir=candidate_model_cache,
+            ),
+        )
+        return self.settings
+
+    def delete_workspace(self, workspace_root: str | Path) -> None:
+        """删除用户已确认放弃的旧工作区。"""
+
+        WorkspaceManager(Path(workspace_root)).delete_managed_workspace(
+            current_root=self.workspace.root
+        )
+
     def update_translation_settings(
         self,
         translation_settings: TranslationSettings,
@@ -365,6 +469,8 @@ class AppContainer:
             task_service=task_service,
             task_service_factory=self.create_task_service,
             settings_updater=self.update_engine_settings,
+            workspace_updater=self.update_workspace,
+            workspace_deleter=self.delete_workspace,
             translation_model_tester=self.test_translation_model,
             asr_hardware_info=self._require_asr_hardware_info(),
             logger=self.logger,

@@ -116,6 +116,86 @@ def test_tasks_page_create_button_emits_request_signal() -> None:
     app.processEvents()
 
 
+def test_tasks_page_disables_new_submission_only_when_capacity_is_full() -> None:
+    """已有任务运行时仍可继续创建，达到普通并发上限后才禁用入口。"""
+
+    app = QApplication.instance() or QApplication([])
+    page = TasksPage(TaskService())
+
+    # act：第一个任务运行时仍有第二个槽位，第二个任务提交后容量耗尽。
+    page.set_project_operation_capacity(active_count=1, max_concurrency=2)
+    assert page.create_task_button.isEnabled() is True
+    assert page.concurrency_label.text() == "后台任务 1/2"
+    assert "自动排队串行执行" in page.resource_policy_label.text()
+
+    page.set_project_operation_capacity(active_count=2, max_concurrency=2)
+
+    # assert：创建入口暂停，但用户仍可刷新并查看交错更新的任务历史。
+    assert page.create_task_button.isEnabled() is False
+    assert page.refresh_button.isEnabled() is True
+    assert page.concurrency_label.text() == "后台任务 2/2"
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_does_not_steal_selection_for_another_task_progress(
+    tmp_path,
+) -> None:
+    """未选中任务的实时事件应更新列表，但不切换用户正在查看的视频。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    for index in (1, 2):
+        project = Project(
+            project_id=f"project-{index}",
+            source_video=tmp_path / f"video-{index}.mp4",
+            source_language="en",
+            target_language="zh-CN",
+            workspace_dir=tmp_path / f"project-{index}",
+        )
+        project.mark_processing()
+        projects.save(project)
+        running = Task(
+            f"task-{index}",
+            project.project_id,
+            "translate_subtitles",
+        )
+        running.start("开始翻译")
+        tasks.save(running)
+
+    page = TasksPage(
+        TaskService(project_repository=projects, task_repository=tasks)
+    )
+    page.refresh_history()
+    selected_item = page._find_project_item("project-1")
+    assert selected_item is not None
+    page.task_list.setCurrentItem(selected_item)
+
+    # act：另一个视频发布新进度，模拟两个后台线程交错上报。
+    page.update_summary(
+        TaskSummaryDTO(
+            task_id="task-2",
+            task_type="translate_subtitles",
+            status="running",
+            progress=75,
+            current_step="逐句翻译 3/4",
+            message="已翻译第 3 条字幕",
+            project_id="project-2",
+        )
+    )
+    app.processEvents()
+
+    # assert：第二个条目更新为 75%，右侧仍保持第一个项目。
+    other_item = page._find_project_item("project-2")
+    assert other_item is not None
+    assert "75%" in other_item.text()
+    assert page.task_list.currentItem() is selected_item
+    assert page.project_id_label.text() == "project-1"
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_tasks_page_prefers_completed_step_over_stale_processing_project(
     tmp_path,
 ) -> None:
