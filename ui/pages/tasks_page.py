@@ -103,7 +103,7 @@ class TasksPage(QWidget):
         self.delete_button.setObjectName("deleteVideoTaskButton")
         self.delete_button.setEnabled(False)
         self.delete_button.clicked.connect(self._request_delete)
-        self.concurrency_label = QLabel("后台 0/1")
+        self.concurrency_label = QLabel("后台 0（创建不限量）")
         self.concurrency_label.setObjectName("taskConcurrencyLabel")
         self.resource_policy_label = QLabel("自动排队串行执行")
         self.resource_policy_label.setObjectName("taskResourcePolicyLabel")
@@ -408,11 +408,11 @@ class TasksPage(QWidget):
         message: str = "",
         active_project_ids: set[str] | None = None,
     ) -> None:
-        """显示后台视频流程用量，并在达到上限时暂停继续提交。
+        """显示后台视频流程用量，但不限制用户继续创建视频任务。
 
         参数：
             active_count：当前仍在运行的视频级后台线程数量。
-            max_concurrency：配置允许同时运行的最大视频流程数量。
+            max_concurrency：保留用于兼容旧调用方的配置值；它不再是创建门槛。
             message：可选的当前操作提示。
             active_project_ids：正在恢复或生成下载成品的已有项目编号。
 
@@ -423,11 +423,11 @@ class TasksPage(QWidget):
         self._active_project_operations = max(0, active_count)
         self._max_project_concurrency = max(1, max_concurrency)
         self._active_project_ids = set(active_project_ids or ())
-        has_capacity = self._active_project_operations < self._max_project_concurrency
-        self.create_task_button.setEnabled(has_capacity)
+        # 视频任务可以无限创建。高资源步骤是否串行由核心层的资源调度器
+        # 决定，不能用“禁用创建按钮”的方式把待处理任务挡在 UI 外面。
+        self.create_task_button.setEnabled(True)
         self.concurrency_label.setText(
-            f"后台 {self._active_project_operations}/"
-            f"{self._max_project_concurrency}"
+            f"后台 {self._active_project_operations}（创建不限量）"
         )
         if message:
             self.message_label.setText(message)
@@ -658,9 +658,13 @@ class TasksPage(QWidget):
             )
             return
 
-        # 下载文件名固定追加“字幕”，即使用户选择了源视频所在目录，
-        # 最终路径也不会与源视频相同，核心导出用例还会再做一次兜底校验。
-        suffix = value.source_video.suffix or ".mp4"
+        # 外挂字幕下载的主要成品是 `.srt`，烧录模式才需要生成视频文件。
+        # 两种模式都追加“字幕”便于用户在下载目录中辨认结果。
+        suffix = (
+            ".srt"
+            if mode_value == ExportMode.SOFT_SUBTITLE.value
+            else (value.source_video.suffix or ".mp4")
+        )
         output_path = (
             download_directory
             / f"{value.source_video.stem}-字幕{suffix}"
@@ -673,8 +677,6 @@ class TasksPage(QWidget):
             )
             return
         output_files = [output_path]
-        if mode_value == ExportMode.SOFT_SUBTITLE.value:
-            output_files.append(output_path.with_suffix(".srt"))
         existing_files = [path for path in output_files if path.exists()]
         if existing_files:
             overwrite = QMessageBox.question(
@@ -716,7 +718,6 @@ class TasksPage(QWidget):
         value = self._selected_history_value
         available = (
             value is not None
-            and self._active_project_operations < self._max_project_concurrency
             and value.project_id not in self._active_project_ids
         )
         retryable = available and (

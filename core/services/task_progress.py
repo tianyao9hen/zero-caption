@@ -14,7 +14,10 @@ from core.domain.enums import ProcessingMode, ProjectStatus, TaskStatus
 _SUCCEEDED_STAGE_PROGRESS = {
     "create_project": 5,
     "transcribe_video": 40,
-    "translate_subtitles": 95,
+    # 完整流程现在在翻译字幕完成后就已经具备“可下载成品”的条件。
+    # 用户点击下载只是按需生成文件，不再是视频任务总进度的前置步骤，
+    # 因此翻译任务成功时直接向用户报告 100%。
+    "translate_subtitles": 100,
     "export_video": 100,
 }
 
@@ -38,10 +41,16 @@ def overall_video_progress(
 
     返回：
         0 到 100 的用户可见总进度。项目在翻译完成后会被标记为完成，
-        因此持久化历史会显示 100%；单独的下载任务也会显示 100%。
+        因此翻译任务和持久化历史都会显示 100%；单独的下载任务也会显示 100%。
     """
 
     if project_status == ProjectStatus.COMPLETED.value:
+        return 100
+
+    # 用户主动下载成品不属于“视频处理任务”的总进度。无论下载正在生成、
+    # 已成功还是失败，字幕处理主链路都已经完成，因此总进度保持 100%，
+    # 下载本身的结果由任务状态和消息单独表达。
+    if task_type == "export_video":
         return 100
 
     if (

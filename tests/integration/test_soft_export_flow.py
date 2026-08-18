@@ -1,7 +1,7 @@
 """外挂字幕导出适配器集成测试。
 
-测试使用小型文本占位文件模拟视频和字幕，验证适配器只负责文件复制，
-不把导出路径或文件系统细节泄露到核心用例。
+测试使用小型文本占位文件模拟视频和字幕，验证适配器只复制字幕文件，
+不会因为用户选择外挂字幕而额外复制原视频。
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from core.dto.task_dto import ExportVideoInput
 from infrastructure.export.soft_subtitle_exporter import SoftSubtitleExporter
 
 
-def test_soft_subtitle_exporter_copies_video_and_sidecar_subtitle(tmp_path) -> None:
-    """外挂模式应生成目标视频和同名 `.srt` 旁车文件。"""
+def test_soft_subtitle_exporter_only_copies_subtitle_file(tmp_path) -> None:
+    """外挂模式应只生成目标 `.srt`，不复制原视频。"""
 
     # arrange
     source_video = tmp_path / "source.mp4"
@@ -31,8 +31,9 @@ def test_soft_subtitle_exporter_copies_video_and_sidecar_subtitle(tmp_path) -> N
     # act
     record = SoftSubtitleExporter().export(request)
 
-    # assert：两个正式产物内容都应与源文件一致，记录保存目标字幕路径。
-    assert output_video.read_bytes() == b"fake video"
+    # assert：旧调用方即使传入视频扩展名，也只会得到规整后的字幕文件。
+    assert output_video.exists() is False
     assert output_video.with_suffix(".srt").read_text(encoding="utf-8") == "译文字幕"
-    assert record.output_path == output_video
+    assert source_video.read_bytes() == b"fake video"
+    assert record.output_path == output_video.with_suffix(".srt")
     assert record.subtitle_path == output_video.with_suffix(".srt")

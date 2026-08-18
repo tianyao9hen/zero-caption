@@ -150,7 +150,7 @@ class FailingSecondOnceTranslator(FakeTranslator):
 
 
 def test_task_service_runs_complete_mvp_pipeline_and_reuses_translation(tmp_path) -> None:
-    """四个用例应生成原文、译文、视频副本和外挂字幕，并复用译文缓存。"""
+    """完整主链路应生成原文和译文，并复用缓存；外挂下载只复制字幕。"""
 
     # arrange：所有仓储由同一个服务共享，模拟应用进程内的真实装配方式。
     workspace = WorkspaceManager(tmp_path / "workspace")
@@ -224,8 +224,9 @@ def test_task_service_runs_complete_mvp_pipeline_and_reuses_translation(tmp_path
     assert transcribed.subtitle_path is not None and transcribed.subtitle_path.is_file()
     assert translated.subtitle_path is not None and translated.subtitle_path.is_file()
     assert "你好" in translated.subtitle_path.read_text(encoding="utf-8")
-    assert output_video.read_bytes() == b"fake video"
+    assert output_video.exists() is False
     assert output_video.with_suffix(".srt").is_file()
+    assert exported.export_record.output_path == output_video.with_suffix(".srt")
     assert translated.task.checkpoint is TaskCheckpoint.TRANSLATED
     assert cached_translation.reused_translation is True
     assert translator.call_count == 2

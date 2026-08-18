@@ -15,11 +15,20 @@ from core.dto.media_dto import AudioStreamDTO, MediaProbeResultDTO, VideoStreamD
 
 @dataclass(slots=True)
 class FFprobeError(RuntimeError):
-    """ffprobe 执行失败时抛出的异常。"""
+    """ffprobe 执行失败时抛出的异常，并保留可诊断的命令输出。"""
 
     command: list[str]
     returncode: int | None
     stderr: str
+
+    def __str__(self) -> str:
+        """返回适合任务页展示的探测失败摘要。"""
+
+        detail = (self.stderr or "").strip()
+        lines = [line.strip() for line in detail.splitlines() if line.strip()]
+        tail = "\n".join(lines[-20:])
+        message = f"ffprobe 探测媒体失败，退出码：{self.returncode}。"
+        return f"{message}\n{tail}" if tail else message
 
 
 class FFprobeAdapter:
@@ -74,6 +83,11 @@ class FFprobeAdapter:
             command,
             capture_output=True,
             text=True,
+            # Windows 中文系统的默认编码通常是 `gbk`，而 `ffprobe` 的 JSON
+            # 和错误输出可能包含 UTF-8 文件名。显式指定编码，避免 Python
+            # 在线程读取子进程输出时因 UnicodeDecodeError 让导入任务失败。
+            encoding="utf-8",
+            errors="replace",
             check=False,
             # `ffprobe` 是控制台程序；桌面安装版在 Windows 上启动它时
             # 使用无窗口标志，避免探测视频时闪出黑色终端窗口。

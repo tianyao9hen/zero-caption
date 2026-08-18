@@ -129,7 +129,7 @@ class TaskService:
         self,
         request: ReexportProjectInput,
     ) -> ExportVideoResult:
-        """在受控的高资源槽位中使用当前译文生成下载视频。"""
+        """在受控的高资源槽位中使用当前译文生成下载成品。"""
 
         usecase = self._require_usecase(self.reexport_project_usecase)
         result = self._run_resource_limited(

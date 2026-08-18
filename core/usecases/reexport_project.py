@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from core.domain.enums import ExportMode
 from core.dto.task_dto import (
     ExportVideoInput,
     ExportVideoResult,
@@ -21,10 +22,10 @@ from core.usecases.export_video import ExportVideo
 
 @dataclass(slots=True)
 class ReexportProject:
-    """使用项目当前保存的完整译文重新生成视频成品。
+    """使用项目当前保存的完整译文重新生成下载成品。
 
     单句编辑会先更新结构化字幕仓储。重新导出时从仓储重新写出 `SRT`，
-    可以确保视频采用最新译文，而不是误用上一次导出时复制的旧旁车文件。
+    可以确保下载结果采用最新译文，而不是误用上一次导出时复制的旧字幕。
     """
 
     project_repository: ProjectRepository
@@ -77,13 +78,10 @@ class ReexportProject:
             subtitle_path,
         )
 
-        # 第三步：优先采用本次显式路径，其次复用项目上次路径，最后回退到
-        # 项目 `exports/`。导出参数先保存，即使外部导出失败也能再次重试。
-        output_path = (
-            request.output_path
-            or project.output_path
-            or project.workspace_dir / "exports" / project.source_video.name
-        )
+        # 第三步：优先采用本次显式路径，其次按当前模式复用项目上次路径，
+        # 最后回退到项目 `exports/`。模式切换时要修正扩展名，避免之前下载
+        # 外挂字幕留下的 `.srt` 被误当成烧录视频输出路径。
+        output_path = self._resolve_output_path(project, request)
         project.export_mode = request.mode
         project.output_path = output_path
         project.touch()
@@ -105,3 +103,31 @@ class ReexportProject:
 
         safe_name = re.sub(r"[^0-9A-Za-z_-]+", "_", language).strip("_")
         return safe_name or "translated"
+
+    @staticmethod
+    def _resolve_output_path(
+        project,
+        request: ReexportProjectInput,
+    ):
+        """按导出模式选择一个不会混淆视频和字幕的默认路径。"""
+
+        if request.output_path is not None:
+            return request.output_path
+
+        previous_path = project.output_path
+        if previous_path is not None:
+            if request.mode is ExportMode.SOFT_SUBTITLE:
+                return previous_path.with_suffix(".srt")
+            if previous_path.suffix.lower() == ".srt":
+                return previous_path.with_suffix(
+                    project.source_video.suffix or ".mp4"
+                )
+            return previous_path
+
+        if request.mode is ExportMode.SOFT_SUBTITLE:
+            return (
+                project.workspace_dir
+                / "exports"
+                / f"{project.source_video.stem}-字幕.srt"
+            )
+        return project.workspace_dir / "exports" / project.source_video.name

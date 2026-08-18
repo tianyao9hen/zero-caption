@@ -134,27 +134,28 @@ def test_main_window_downloads_completed_translation_without_changing_source(
     while window._pipeline_runners and monotonic() < deadline:
         app.processEvents()
 
-    # assert：新视频与字幕进入所选目录，原视频没有被覆盖或改写。
+    # assert：外挂模式只下载字幕，原视频既不复制也不被覆盖或改写。
     output_video = download_directory / "lesson-字幕.mp4"
     output_subtitle = download_directory / "lesson-字幕.srt"
     assert window._pipeline_runners == {}
-    assert output_video.read_bytes() == source_content
+    assert output_video.exists() is False
     assert "你好" in output_subtitle.read_text(encoding="utf-8")
     assert source_video.read_bytes() == source_content
-    assert "下载成品" in window.status_widget.label.text()
+    assert "下载完成" in window.status_widget.label.text()
+    assert str(output_subtitle) in window.status_widget.label.text()
 
     window.close()
     window.deleteLater()
     app.processEvents()
 
 
-def test_main_window_runs_multiple_video_operations_until_capacity(
+def test_main_window_accepts_more_video_operations_than_configured_capacity(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """主窗口应同时保留多个视频线程，并在任一完成后重新开放入口。"""
+    """主窗口不应把旧并发配置当成视频任务创建数量限制。"""
 
-    # arrange：两个操作都等待同一个事件，确保断言时线程仍处于运行状态。
+    # arrange：三个操作都等待同一个事件，确保断言时线程仍处于运行状态。
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
     workspace = WorkspaceManager(tmp_path / "workspace")
@@ -171,7 +172,7 @@ def test_main_window_runs_multiple_video_operations_until_capacity(
     )
     window = container.create_main_window()
     release_operations = Event()
-    both_started = Event()
+    all_started = Event()
     count_lock = Lock()
     started_count = 0
 
@@ -181,26 +182,27 @@ def test_main_window_runs_multiple_video_operations_until_capacity(
         nonlocal started_count
         with count_lock:
             started_count += 1
-            if started_count == 2:
-                both_started.set()
+            if started_count == 3:
+                all_started.set()
         release_operations.wait(timeout=3)
         return object()
 
-    # act：连续提交两个视频级操作，不等待第一个结束。
+    # act：旧配置值是 2，但连续提交三个视频级操作也都应被接受。
     assert window._start_project_operation(operation, lambda _result: None, "任务一")
     assert window._start_project_operation(operation, lambda _result: None, "任务二")
+    assert window._start_project_operation(operation, lambda _result: None, "任务三")
     deadline = monotonic() + 3
-    while not both_started.is_set() and monotonic() < deadline:
+    while not all_started.is_set() and monotonic() < deadline:
         app.processEvents()
 
-    # assert：两个线程同时存活，容量已满时两个创建入口都暂停。
-    assert both_started.is_set() is True
-    assert len(window._pipeline_runners) == 2
-    assert window.tasks_page.concurrency_label.text() == "后台 2/2"
-    assert window.tasks_page.create_task_button.isEnabled() is False
-    assert window.import_button.isEnabled() is False
+    # assert：三个线程都存活，两个创建入口仍然可用，后续任务可继续排队。
+    assert all_started.is_set() is True
+    assert len(window._pipeline_runners) == 3
+    assert window.tasks_page.concurrency_label.text() == "后台 3（创建不限量）"
+    assert window.tasks_page.create_task_button.isEnabled() is True
+    assert window.import_button.isEnabled() is True
 
-    # act：放行并等待两个线程释放，验证入口会自动恢复。
+    # act：放行并等待三个线程释放，验证入口始终保持可用。
     release_operations.set()
     deadline = monotonic() + 3
     while window._pipeline_runners and monotonic() < deadline:

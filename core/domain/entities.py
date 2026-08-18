@@ -48,8 +48,8 @@ class Project:
     translation_context: str = ""
     processing_mode: ProcessingMode = ProcessingMode.FULL_PIPELINE
     export_mode: ExportMode = ExportMode.SOFT_SUBTITLE
-    # 这里保存用户可见的最近成果路径：仅识别任务是 `.srt`，完整流程
-    # 在用户点击下载后才会记录视频成品。内部字幕和缓存固定放在工作区。
+    # 这里保存用户可见的最近成果路径：仅识别任务和外挂字幕下载是 `.srt`，
+    # 烧录模式才记录视频成品。内部字幕和缓存固定放在项目工作区。
     output_path: Path | None = None
     status: ProjectStatus = ProjectStatus.NEW
     created_at: datetime = field(default_factory=_now)

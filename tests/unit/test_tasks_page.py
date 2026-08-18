@@ -162,24 +162,24 @@ def test_tasks_page_create_button_emits_request_signal() -> None:
     app.processEvents()
 
 
-def test_tasks_page_disables_new_submission_only_when_capacity_is_full() -> None:
-    """已有任务运行时仍可继续创建，达到普通并发上限后才禁用入口。"""
+def test_tasks_page_never_blocks_new_submission_by_active_task_count() -> None:
+    """活动任务再多也不能禁用创建入口，高资源步骤由调度器排队。"""
 
     app = QApplication.instance() or QApplication([])
     page = TasksPage(TaskService())
 
-    # act：第一个任务运行时仍有第二个槽位，第二个任务提交后容量耗尽。
+    # act：分别模拟未达到和达到旧并发配置值的两种状态。
     page.set_project_operation_capacity(active_count=1, max_concurrency=2)
     assert page.create_task_button.isEnabled() is True
-    assert page.concurrency_label.text() == "后台 1/2"
+    assert page.concurrency_label.text() == "后台 1（创建不限量）"
     assert "自动排队串行执行" in page.resource_policy_label.text()
 
     page.set_project_operation_capacity(active_count=2, max_concurrency=2)
 
-    # assert：创建入口暂停，但用户仍可刷新并查看交错更新的任务历史。
-    assert page.create_task_button.isEnabled() is False
+    # assert：达到旧上限后仍可创建和刷新，不把排队任务挡在页面外。
+    assert page.create_task_button.isEnabled() is True
     assert page.refresh_button.isEnabled() is True
-    assert page.concurrency_label.text() == "后台 2/2"
+    assert page.concurrency_label.text() == "后台 2（创建不限量）"
     page.deleteLater()
     app.processEvents()
 

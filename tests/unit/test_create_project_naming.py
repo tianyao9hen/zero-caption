@@ -86,3 +86,24 @@ def test_legacy_project_keeps_original_video_name_in_history(tmp_path) -> None:
 
     assert result.project.workspace_dir == workspace.root
     assert history[0].display_name == "legacy.mp4"
+
+
+def test_unicode_video_name_can_create_project_directory(tmp_path) -> None:
+    """中文和日文文件名不应阻止视频任务创建。"""
+
+    workspace = WorkspaceManager(tmp_path / "data")
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    usecase = CreateProject(
+        project_repository=projects,
+        task_repository=tasks,
+        project_workspace=workspace,
+    )
+    source_video = tmp_path / "MKMP-722 喉も膣も 皆月ひかる.mp4"
+    source_video.write_bytes(b"fake video")
+
+    result = usecase.execute(_request(source_video, workspace))
+
+    assert result.project.workspace_dir.is_dir()
+    assert result.project.workspace_dir.name.startswith("MKMP-722 喉も膣も 皆月ひかる-")
+    assert projects.get_by_id(result.project.project_id) is not None

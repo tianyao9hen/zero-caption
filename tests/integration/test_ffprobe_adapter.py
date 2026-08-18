@@ -32,6 +32,19 @@ def test_ffprobe_adapter_reads_real_media_info():
     assert result.audio_streams[0].codec_name
 
 
+def test_ffprobe_adapter_supports_unicode_source_filename(tmp_path):
+    """视频文件名包含中文或日文时，仍应能正常读取媒体信息。"""
+
+    source_path = tmp_path / "MKMP-722 喉も膣も 皆月ひかる.mp4"
+    source_path.write_bytes(Path("tests/video/demo.mp4").read_bytes())
+
+    result = FFprobeAdapter().probe(source_path)
+
+    assert result.source_path == source_path
+    assert result.duration_ms > 0
+    assert result.audio_streams
+
+
 def test_ffprobe_adapter_prefers_bundled_executable():
     """应当优先使用随包内置的 ffprobe。"""
 

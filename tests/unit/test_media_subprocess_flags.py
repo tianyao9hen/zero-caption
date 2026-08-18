@@ -9,7 +9,9 @@ import os
 import subprocess
 from types import SimpleNamespace
 
-from infrastructure.media.ffmpeg import FFmpegAdapter
+import pytest
+
+from infrastructure.media.ffmpeg import FFmpegAdapter, FFmpegError
 from infrastructure.media.ffprobe import FFprobeAdapter
 
 
@@ -61,3 +63,34 @@ def test_ffprobe_uses_hidden_window_flags(tmp_path, monkeypatch) -> None:
     FFprobeAdapter(executable).probe(tmp_path / "source.mp4")
 
     assert captured["creationflags"] == _expected_creation_flags()
+
+
+def test_ffmpeg_failure_removes_partial_audio_and_keeps_diagnostic_details(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """FFmpeg 失败时不能留下残缺缓存，错误摘要还应指出音轨问题。"""
+
+    executable = tmp_path / "ffmpeg.exe"
+    executable.write_bytes(b"fake")
+    output_path = tmp_path / "partial.wav"
+
+    def fake_run(command, **_kwargs):
+        output_path.write_bytes(b"partial")
+        return SimpleNamespace(
+            returncode=1,
+            stderr="[aac] invalid band type\nConversion failed!",
+            stdout="",
+        )
+
+    monkeypatch.setattr("infrastructure.media.ffmpeg.subprocess.run", fake_run)
+
+    with pytest.raises(FFmpegError) as exc_info:
+        FFmpegAdapter(executable).extract_audio(
+            tmp_path / "source.mp4",
+            output_path,
+        )
+
+    assert output_path.exists() is False
+    assert "AAC" in str(exc_info.value)
+    assert "invalid band type" in str(exc_info.value)

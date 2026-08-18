@@ -48,9 +48,9 @@ class ExportVideo:
         )
         task.start("开始导出")
         task.update_progress(
-            # 翻译阶段最高到 95%，导出从 96% 接续，避免阶段切换时
-            # 用户可见的总进度反而从 95% 倒退到 60%。
-            progress=96,
+            # 下载动作不属于视频处理总进度。任务仍记录为运行中，方便界面
+            # 展示“正在生成”，但百分比保持 100%，不能让已完成任务倒退。
+            progress=100,
             current_step="调用导出器",
             checkpoint=TaskCheckpoint.TRANSLATED,
             message="字幕已准备好",
@@ -64,7 +64,16 @@ class ExportVideo:
             # 具体是复制旁车文件还是重新编码由基础设施适配器决定。
             export_record = self.exporter.export(request)
             self.export_record_repository.save(export_record)
-            task.mark_succeeded("导出完成", checkpoint=TaskCheckpoint.EXPORTED)
+            # 不同导出模式的主要成品类型不同：烧录模式返回视频，外挂模式
+            # 返回字幕文件。项目记录应保存适配器实际落盘的路径，供历史页
+            # 和下一次下载正确复用，而不是盲目保存请求里的视频路径。
+            project.output_path = export_record.output_path
+            # 成功消息同时写入“下载完成”和实际落盘路径，避免后台最后一条
+            # 100% 进度事件覆盖界面刚展示的下载结果，也便于历史任务核对文件。
+            task.mark_succeeded(
+                f"下载完成：{export_record.output_path}",
+                checkpoint=TaskCheckpoint.EXPORTED,
+            )
             self.task_repository.save(task)
             if self.event_publisher is not None:
                 self.event_publisher.publish(task)

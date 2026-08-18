@@ -61,7 +61,11 @@ class VideoTaskHistoryDTO:
 
 @dataclass(slots=True)
 class ExportVideoInput:
-    """描述导出用例和导出端口共用的输入参数。"""
+    """描述导出用例和导出端口共用的输入参数。
+
+    `output_path` 表示用户期望的主要成品路径。外挂模式最终会规整为
+    `.srt` 字幕文件，烧录模式则保持为视频文件。
+    """
 
     project_id: str
     source_video: Path

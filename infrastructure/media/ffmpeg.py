@@ -12,11 +12,25 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class FFmpegError(RuntimeError):
-    """FFmpeg 执行失败时抛出的异常。"""
+    """FFmpeg 执行失败时抛出的异常，并保留可诊断的命令输出。"""
 
     command: list[str]
     returncode: int | None
     stderr: str
+
+    def __str__(self) -> str:
+        """返回适合任务页和错误对话框展示的简短错误摘要。"""
+
+        detail = (self.stderr or "").strip()
+        lines = [line.strip() for line in detail.splitlines() if line.strip()]
+        # FFmpeg 可能输出数万行逐帧错误。只保留末尾少量信息，避免把
+        # SQLite 任务记录和 Qt 对话框撑爆，同时保留真正的失败原因。
+        tail = "\n".join(lines[-20:])
+        if any("aac" in line.lower() for line in lines):
+            message = "源视频音轨无法解码，可能包含损坏的 AAC 音频数据。"
+        else:
+            message = f"FFmpeg 抽取音频失败，退出码：{self.returncode}。"
+        return f"{message}\n{tail}" if tail else message
 
 
 class FFmpegAdapter:
@@ -74,6 +88,10 @@ class FFmpegAdapter:
             command,
             capture_output=True,
             text=True,
+            # 源视频或目标音频路径可能包含中文、日文等字符；FFmpeg 输出
+            # 使用 UTF-8 解码，避免 Windows 默认代码页无法读取日志而中断任务。
+            encoding="utf-8",
+            errors="replace",
             check=False,
             # 安装版是无控制台的桌面程序。Windows 默认启动控制台型
             # `FFmpeg` 时会额外弹出终端窗口，因此必须显式隐藏子进程窗口。
@@ -82,6 +100,9 @@ class FFmpegAdapter:
             ),
         )
         if completed.returncode != 0:
+            # FFmpeg 失败时可能已经写出一个不完整的 WAV。残缺文件不能
+            # 留在 `temp/` 中，否则下次重试会被误判为可复用的成功缓存。
+            output_path.unlink(missing_ok=True)
             raise FFmpegError(
                 command=command,
                 returncode=completed.returncode,

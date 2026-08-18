@@ -189,15 +189,6 @@ class MainWindow(QMainWindow):
     def open_import_dialog(self) -> None:
         """收集参数并把完整处理请求提交到后台线程。"""
 
-        if not self._has_pipeline_capacity():
-            QMessageBox.information(
-                self,
-                "后台任务已满",
-                f"当前最多同时处理 {self._max_pipeline_concurrency} 个视频，"
-                "请等待其中一个任务完成。",
-            )
-            return
-
         dialog = ImportDialog(
             self,
             default_source_language=self.settings.subtitle.source_language,
@@ -331,13 +322,6 @@ class MainWindow(QMainWindow):
                 active_project_ids=self._active_pipeline_project_ids(),
             )
             return False
-        if not self._has_pipeline_capacity():
-            QMessageBox.information(
-                self,
-                "后台任务已满",
-                f"当前最多同时处理 {self._max_pipeline_concurrency} 个视频。",
-            )
-            return False
         self.navigation.set_current_page(1)
         runner = PipelineRunner(operation)
         runner.succeeded.connect(success_handler)
@@ -447,9 +431,13 @@ class MainWindow(QMainWindow):
         self._flush_pending_task_deletions()
 
     def _has_pipeline_capacity(self) -> bool:
-        """判断当前是否还能提交一个视频级后台流程。"""
+        """返回视频任务是否允许提交。
 
-        return len(self._pipeline_runners) < self._max_pipeline_concurrency
+        创建任务不再受活动线程数量限制。`PipelineRunner` 可以承载多个
+        待处理视频，而识别和视频导出等高资源步骤由共享资源调度器控制。
+        """
+
+        return True
 
     def _active_pipeline_project_ids(self) -> set[str]:
         """返回正在恢复或生成下载成品的已有项目编号集合。"""
@@ -479,7 +467,8 @@ class MainWindow(QMainWindow):
             message=message,
             active_project_ids=self._active_pipeline_project_ids(),
         )
-        self.import_button.setEnabled(self._has_pipeline_capacity())
+        # 创建入口始终保持可用；高资源步骤的资源限制不应阻止用户建立任务。
+        self.import_button.setEnabled(True)
 
     def _handle_engine_settings_save(self, value: object) -> None:
         """保存识别与翻译配置，并重建后续任务使用的服务。"""
