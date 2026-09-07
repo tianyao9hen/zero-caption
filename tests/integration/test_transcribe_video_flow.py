@@ -22,6 +22,7 @@ from core.dto.subtitle_dto import SubtitleSegmentDTO
 from core.usecases.create_project import CreateProject
 from core.usecases.transcribe_video import TranscribeVideo
 from infrastructure.storage.workspace import WorkspaceManager
+from infrastructure.media.segmenter import AudioSegmenter
 
 
 class InMemoryProjectRepository:
@@ -153,6 +154,45 @@ class RecordingAudioExtractor:
 
 
 @dataclass(slots=True)
+class RecordingAudioSegmentExtractor:
+    """记录长音频裁剪范围，并生成可复用的块文件。"""
+
+    calls: list[tuple[Path, Path, int, int]]
+
+    def extract_audio_segment(
+        self,
+        source_path: Path,
+        output_path: Path,
+        start_ms: int,
+        end_ms: int,
+    ) -> Path:
+        """模拟 FFmpeg 按绝对时间裁剪音频。"""
+
+        self.calls.append((source_path, output_path, start_ms, end_ms))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake chunk")
+        return output_path
+
+
+@dataclass(slots=True)
+class LongMediaProbe(RecordingMediaProbe):
+    """返回十分钟以上时长，用于触发固定窗口识别。"""
+
+    def probe(self, source_path: Path) -> MediaProbeResultDTO:
+        """模拟包含单条音轨的 610 秒视频。"""
+
+        self.calls.append(source_path)
+        return MediaProbeResultDTO(
+            source_path=source_path,
+            duration_ms=610_000,
+            video_stream=VideoStreamDTO(codec_name="h264", width=1280, height=720),
+            audio_streams=[
+                AudioStreamDTO(codec_name="aac", sample_rate=48_000, channels=2),
+            ],
+        )
+
+
+@dataclass(slots=True)
 class RecordingAsrEngine:
     """记录 ASR 调用，并返回预设的原文字幕片段。"""
 
@@ -187,6 +227,40 @@ class RecordingAsrEngine:
         """模拟适配器向任务页报告实际运行参数。"""
 
         return "实际使用 medium + CUDA + float16 完成识别。"
+
+
+class CacheAwareRecordingAsrEngine(RecordingAsrEngine):
+    """提供固定参数签名，模拟生产 ASR 的缓存失效能力。"""
+
+    def cache_key(self) -> str:
+        """返回测试使用的稳定识别参数签名。"""
+
+        return "test-asr-v2"
+
+
+@dataclass(slots=True)
+class AbnormalDurationAsrEngine:
+    """返回历史故障形态的超长字幕，用于保护质量门禁。"""
+
+    calls: list[tuple[Path, str | None]]
+
+    def transcribe(
+        self,
+        audio_path: Path,
+        language: str | None = None,
+    ) -> list[SubtitleSegmentDTO]:
+        """模拟一句文本跨越二十分钟的损坏时间轴。"""
+
+        self.calls.append((audio_path, language))
+        return [
+            SubtitleSegmentDTO(
+                segment_id="seg-1",
+                start_ms=1_000,
+                end_ms=1_201_000,
+                text="异常字幕",
+                language=language or "ja",
+            )
+        ]
 
 
 class RecordingSrtWriter:
@@ -427,3 +501,154 @@ def test_transcribe_video_flow_reuses_audio_and_complete_transcript_cache(
     assert result.reused_transcript is True
     assert result.audio_path == cached_audio_path
     assert result.subtitle_path == cached_srt_path
+
+
+def test_transcribe_video_splits_long_audio_and_restores_absolute_timestamps(
+    workspace_temp_dir: Path,
+) -> None:
+    """长音频应分块识别，局部字幕时间要回填到原始绝对时间轴。"""
+
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    publisher = RecordingTaskEventPublisher()
+    workspace = WorkspaceManager(workspace_temp_dir / "workspace")
+    source_video = _create_demo_source_video(workspace_temp_dir)
+    create_result = _build_create_project_usecase(projects, tasks, publisher).execute(
+        CreateProjectInput(
+            source_video=source_video,
+            source_language="ja-JP",
+            target_language="zh-CN",
+            workspace_dir=workspace.root,
+        )
+    )
+    project_dir = workspace.ensure_project_structure(create_result.project.project_id)
+    create_result.project.workspace_dir = project_dir
+    projects.save(create_result.project)
+
+    audio_extractor = RecordingAudioExtractor(calls=[])
+    segment_extractor = RecordingAudioSegmentExtractor(calls=[])
+    asr_engine = RecordingAsrEngine(calls=[])
+    usecase = TranscribeVideo(
+        project_repository=projects,
+        task_repository=tasks,
+        subtitle_repository=subtitles,
+        media_probe=LongMediaProbe(calls=[]),
+        audio_extractor=audio_extractor,
+        audio_segment_extractor=segment_extractor,
+        audio_segment_planner=AudioSegmenter(300_000, overlap_ms=2_000),
+        asr_engine=asr_engine,
+        srt_writer=RecordingSrtWriter(),
+        event_publisher=publisher,
+    )
+
+    result = usecase.execute(project_id=create_result.project.project_id)
+
+    assert [(call[2], call[3]) for call in segment_extractor.calls] == [
+        (0, 300_000),
+        (298_000, 598_000),
+        (596_000, 610_000),
+    ]
+    assert len(asr_engine.calls) == 3
+    assert [segment.start_ms for segment in result.source_segments] == [
+        0,
+        1_000,
+        298_000,
+        299_000,
+        596_000,
+        597_000,
+    ]
+    assert "已分 3 个音频块处理" in result.runtime_message
+
+
+def test_transcribe_video_invalidates_unsigned_legacy_transcript_cache(
+    workspace_temp_dir: Path,
+) -> None:
+    """生产参数已有签名而旧项目没有签名时，必须重新识别而不是复用坏字幕。"""
+
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    publisher = RecordingTaskEventPublisher()
+    workspace = WorkspaceManager(workspace_temp_dir / "workspace")
+    source_video = _create_demo_source_video(workspace_temp_dir)
+    create_result = _build_create_project_usecase(projects, tasks, publisher).execute(
+        CreateProjectInput(
+            source_video=source_video,
+            source_language="ja-JP",
+            target_language="zh-CN",
+            workspace_dir=workspace.root,
+        )
+    )
+    project_dir = workspace.ensure_project_structure(create_result.project.project_id)
+    create_result.project.workspace_dir = project_dir
+    projects.save(create_result.project)
+    cached_audio = project_dir / "temp" / "source.wav"
+    cached_audio.write_bytes(b"cached audio")
+    (project_dir / "subtitles" / "source.srt").write_text(
+        "旧字幕",
+        encoding="utf-8",
+    )
+    subtitles.save_source_segments(
+        create_result.project.project_id,
+        [SubtitleSegmentDTO("seg-1", 0, 20_000_000, "旧字幕", "ja")],
+    )
+    asr_engine = CacheAwareRecordingAsrEngine(calls=[])
+    usecase = TranscribeVideo(
+        project_repository=projects,
+        task_repository=tasks,
+        subtitle_repository=subtitles,
+        media_probe=RecordingMediaProbe(calls=[]),
+        audio_extractor=RecordingAudioExtractor(calls=[]),
+        asr_engine=asr_engine,
+        srt_writer=RecordingSrtWriter(),
+        event_publisher=publisher,
+    )
+
+    result = usecase.execute(project_id=create_result.project.project_id)
+
+    assert asr_engine.calls == [(cached_audio, "ja-JP")]
+    assert result.reused_transcript is False
+    assert all(segment.end_ms - segment.start_ms <= 30_000 for segment in result.source_segments)
+    signature_path = project_dir / "cache" / "transcription-signature.txt"
+    assert signature_path.is_file()
+
+
+def test_transcribe_video_rejects_abnormally_long_subtitle_timeline(
+    workspace_temp_dir: Path,
+) -> None:
+    """识别器再次产出分钟级单句时，应失败而不是把坏时间轴写入缓存。"""
+
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    publisher = RecordingTaskEventPublisher()
+    workspace = WorkspaceManager(workspace_temp_dir / "workspace")
+    source_video = _create_demo_source_video(workspace_temp_dir)
+    create_result = _build_create_project_usecase(projects, tasks, publisher).execute(
+        CreateProjectInput(
+            source_video=source_video,
+            source_language="ja-JP",
+            target_language="zh-CN",
+            workspace_dir=workspace.root,
+        )
+    )
+    project_dir = workspace.ensure_project_structure(create_result.project.project_id)
+    create_result.project.workspace_dir = project_dir
+    projects.save(create_result.project)
+    engine = AbnormalDurationAsrEngine(calls=[])
+    usecase = TranscribeVideo(
+        project_repository=projects,
+        task_repository=tasks,
+        subtitle_repository=subtitles,
+        media_probe=RecordingMediaProbe(calls=[]),
+        audio_extractor=RecordingAudioExtractor(calls=[]),
+        asr_engine=engine,
+        srt_writer=RecordingSrtWriter(),
+        event_publisher=publisher,
+    )
+
+    with pytest.raises(ValueError, match="超过识别质量上限"):
+        usecase.execute(project_id=create_result.project.project_id)
+
+    assert subtitles.get_source_segments(create_result.project.project_id) == []

@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,7 +32,13 @@ class FasterWhisperEngine:
         compute_type: str = "int8",
         model_cache_dir: Path | None = None,
         beam_size: int = 5,
-        vad_filter: bool = True,
+        vad_filter: bool = False,
+        word_timestamps: bool = True,
+        condition_on_previous_text: bool = False,
+        hallucination_silence_threshold: float | None = 2.0,
+        vad_threshold: float = 0.3,
+        vad_min_silence_duration_ms: int = 500,
+        vad_speech_ratio_fallback: float = 0.1,
         allow_cpu_fallback: bool = True,
         fallback_model_name: str | None = None,
         fallback_compute_type: str = "int8",
@@ -43,7 +52,18 @@ class FasterWhisperEngine:
             compute_type：推理精度配置，例如 `int8` 或 `float16`。
             model_cache_dir：模型缓存目录。传相对路径时，将按当前工作目录解析。
             beam_size：解码时使用的束搜索宽度。
-            vad_filter：是否启用内置的语音活动检测，减少纯静音片段。
+            vad_filter：是否启用内置的语音活动检测。默认关闭，避免低信噪比
+                素材在识别前被错误删除大量对白。
+            word_timestamps：是否启用词级时间戳。开启后字幕段会使用首词和
+                末词时间，避免 VAD 块回映射产生几十分钟的单条字幕。
+            condition_on_previous_text：是否把前一个窗口文本继续作为提示。
+                长音频默认关闭，减少一次误识别向后连续扩散。
+            hallucination_silence_threshold：词级时间戳模式下允许跳过疑似
+                幻觉静音区间的秒数阈值。
+            vad_threshold：用户显式启用 VAD 时使用的语音概率阈值。
+            vad_min_silence_duration_ms：VAD 切分语音块所需的最短静音时长。
+            vad_speech_ratio_fallback：VAD 保留比例低于该值时自动关闭 VAD
+                重跑当前音频块，防止大面积漏识别。
             allow_cpu_fallback：CUDA 初始化失败时是否自动切换到 CPU。
             fallback_model_name：CPU 回退时使用的本地模型目录。
             fallback_compute_type：CPU 回退时使用的推理精度。
@@ -55,7 +75,22 @@ class FasterWhisperEngine:
         self.compute_type = compute_type
         self.model_cache_dir = Path(model_cache_dir) if model_cache_dir is not None else None
         self.beam_size = beam_size
+        if hallucination_silence_threshold is not None and not word_timestamps:
+            raise ValueError("幻觉静音检测依赖词级时间戳。")
+        if not 0 < vad_threshold < 1:
+            raise ValueError("VAD 语音阈值必须位于 0 和 1 之间。")
+        if vad_min_silence_duration_ms <= 0:
+            raise ValueError("VAD 最短静音时长必须大于 0。")
+        if not 0 <= vad_speech_ratio_fallback <= 1:
+            raise ValueError("VAD 回退比例必须位于 0 和 1 之间。")
+
         self.vad_filter = vad_filter
+        self.word_timestamps = word_timestamps
+        self.condition_on_previous_text = condition_on_previous_text
+        self.hallucination_silence_threshold = hallucination_silence_threshold
+        self.vad_threshold = vad_threshold
+        self.vad_min_silence_duration_ms = vad_min_silence_duration_ms
+        self.vad_speech_ratio_fallback = vad_speech_ratio_fallback
         self.allow_cpu_fallback = allow_cpu_fallback
         self.fallback_model_name = fallback_model_name or model_name
         self.fallback_compute_type = fallback_compute_type
@@ -64,6 +99,12 @@ class FasterWhisperEngine:
         self.active_device = device
         self.active_compute_type = compute_type
         self.fallback_reason = ""
+        self.vad_fallback_reason = ""
+        self.detected_language = "unknown"
+        self.detected_language_probability = 0.0
+        self.last_audio_duration_seconds = 0.0
+        self.last_duration_after_vad_seconds = 0.0
+        self.last_max_segment_duration_seconds = 0.0
         self._fallback_used = False
         self._model: Any | None = None
 
@@ -82,6 +123,16 @@ class FasterWhisperEngine:
         if not source_path.exists():
             raise FileNotFoundError(f"未找到待识别音频文件：{source_path}")
 
+        # 每个外部调用都重置当前音频块的诊断值，避免上一个项目的 VAD
+        # 回退提示被错误带到本次任务。CUDA 回退状态不重置，因为模型一旦
+        # 切换到 CPU，后续调用仍会继续使用同一个 CPU 模型。
+        self.vad_fallback_reason = ""
+        self.detected_language = "unknown"
+        self.detected_language_probability = 0.0
+        self.last_audio_duration_seconds = 0.0
+        self.last_duration_after_vad_seconds = 0.0
+        self.last_max_segment_duration_seconds = 0.0
+
         try:
             return self._transcribe_once(source_path, language)
         except Exception as exc:
@@ -93,16 +144,57 @@ class FasterWhisperEngine:
             return self._transcribe_once(source_path, language)
 
     def runtime_summary(self) -> str:
-        """返回本次实际生效的模型、设备、精度和可选回退提示。"""
+        """返回本次实际生效参数和识别质量摘要。"""
 
         model_name = Path(self.active_model_name).name
         active_summary = (
             f"实际使用 {model_name} + {self.active_device.upper()} + "
             f"{self.active_compute_type} 完成识别。"
         )
+        details = [active_summary]
+        if self.detected_language != "unknown":
+            details.append(
+                f"识别语言 {self.detected_language}"
+                f"（置信度 {self.detected_language_probability:.2f}）"
+            )
+        if self.last_audio_duration_seconds > 0:
+            details.append(
+                f"最长字幕 {self.last_max_segment_duration_seconds:.2f} 秒"
+            )
+        if self.vad_fallback_reason:
+            details.insert(0, self.vad_fallback_reason)
         if self.fallback_reason:
-            return f"{self.fallback_reason}；{active_summary}"
-        return active_summary
+            details.insert(0, self.fallback_reason)
+        return "；".join(details)
+
+    def cache_key(self) -> str:
+        """返回模型与关键识别参数组成的稳定缓存签名。
+
+        缓存只保存摘要，不包含音频、字幕正文或用户密钥。升级库版本、切换
+        模型或修改影响时间轴的参数后，旧识别结果会自动失效。
+        """
+
+        try:
+            library_version = version("faster-whisper")
+        except PackageNotFoundError:
+            library_version = "unknown"
+        payload = {
+            "schema": "zero-caption-asr-v2",
+            "library_version": library_version,
+            # 发布版资源目录可能由 PyInstaller 解压到每次不同的临时路径。
+            # 缓存只记录稳定模型目录名，避免应用重启后无意义地全部失效。
+            "model_name": Path(self.model_name).name,
+            "beam_size": self.beam_size,
+            "vad_filter": self.vad_filter,
+            "word_timestamps": self.word_timestamps,
+            "condition_on_previous_text": self.condition_on_previous_text,
+            "hallucination_silence_threshold": self.hallucination_silence_threshold,
+            "vad_threshold": self.vad_threshold,
+            "vad_min_silence_duration_ms": self.vad_min_silence_duration_ms,
+            "vad_speech_ratio_fallback": self.vad_speech_ratio_fallback,
+        }
+        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        return f"fw2-{sha256(encoded).hexdigest()}"
 
     def verify_runtime(
         self,
@@ -111,9 +203,8 @@ class FasterWhisperEngine:
     ) -> str:
         """关闭静音过滤并执行一次真实模型计算，供发布包验收使用。
 
-        普通字幕任务仍按用户配置使用语音活动检测。这里只在独立自检进程中
-        临时关闭过滤，避免一秒静音在进入 GPU 编码器前就被跳过，造成动态库
-        缺失却被误报为“模型加载成功”。
+        这里只在独立自检进程中强制关闭过滤，避免一秒静音在进入 GPU
+        编码器前就被跳过，造成动态库缺失却被误报为“模型加载成功”。
         """
 
         original_vad_filter = self.vad_filter
@@ -132,14 +223,97 @@ class FasterWhisperEngine:
         """使用当前活动设备执行一次识别，不在此方法内重复回退。"""
 
         model = self._get_model()
-        segments, info = model.transcribe(
+        results, info = self._run_model_transcription(
+            model=model,
+            source_path=source_path,
+            language=language,
+            vad_filter=self.vad_filter,
+        )
+
+        # VAD 只是性能优化，不能以删除绝大多数音频为代价。保留比例异常低时
+        # 自动无 VAD 重跑当前块，优先保证对白完整性。
+        if self.vad_filter and self._should_retry_without_vad(info):
+            duration = float(getattr(info, "duration", 0.0) or 0.0)
+            duration_after_vad = float(
+                getattr(info, "duration_after_vad", 0.0) or 0.0
+            )
+            ratio = duration_after_vad / duration if duration > 0 else 0.0
+            self.vad_fallback_reason = (
+                f"VAD 仅保留 {ratio:.1%} 音频，已关闭 VAD 重试"
+            )
+            results, info = self._run_model_transcription(
+                model=model,
+                source_path=source_path,
+                language=language,
+                vad_filter=False,
+            )
+
+        self._record_transcription_info(info, results)
+        return results
+
+    def _run_model_transcription(
+        self,
+        model: Any,
+        source_path: Path,
+        language: str | None,
+        vad_filter: bool,
+    ) -> tuple[list[SubtitleSegmentDTO], Any]:
+        """使用一组明确参数执行模型，并立即消费惰性片段迭代器。"""
+
+        vad_parameters = None
+        if vad_filter:
+            vad_parameters = {
+                "threshold": self.vad_threshold,
+                "min_silence_duration_ms": self.vad_min_silence_duration_ms,
+                "max_speech_duration_s": 30,
+                "speech_pad_ms": 500,
+            }
+        raw_segments, info = model.transcribe(
             str(source_path),
             language=language,
             beam_size=self.beam_size,
-            vad_filter=self.vad_filter,
+            vad_filter=vad_filter,
+            vad_parameters=vad_parameters,
+            word_timestamps=self.word_timestamps,
+            condition_on_previous_text=self.condition_on_previous_text,
+            hallucination_silence_threshold=self.hallucination_silence_threshold,
         )
         detected_language = language or getattr(info, "language", None) or "unknown"
-        return self._build_segments(segments=segments, language=detected_language)
+        return self._build_segments(raw_segments, detected_language), info
+
+    def _should_retry_without_vad(self, info: Any) -> bool:
+        """判断 VAD 是否删除了异常高比例的输入音频。"""
+
+        duration = float(getattr(info, "duration", 0.0) or 0.0)
+        duration_after_vad = float(
+            getattr(info, "duration_after_vad", duration) or 0.0
+        )
+        if duration <= 0:
+            return False
+        return duration_after_vad / duration < self.vad_speech_ratio_fallback
+
+    def _record_transcription_info(
+        self,
+        info: Any,
+        segments: list[SubtitleSegmentDTO],
+    ) -> None:
+        """保存不含正文的诊断指标，供任务结果和日志展示。"""
+
+        self.detected_language = getattr(info, "language", None) or "unknown"
+        self.detected_language_probability = float(
+            getattr(info, "language_probability", 0.0) or 0.0
+        )
+        self.last_audio_duration_seconds = float(
+            getattr(info, "duration", 0.0) or 0.0
+        )
+        self.last_duration_after_vad_seconds = float(
+            getattr(info, "duration_after_vad", self.last_audio_duration_seconds)
+            or 0.0
+        )
+        self.last_max_segment_duration_seconds = max(
+            ((segment.end_ms - segment.start_ms) / 1000 for segment in segments),
+            default=0.0,
+        )
 
     def _get_model(self) -> Any:
         """延迟创建并缓存底层 `WhisperModel` 实例。"""

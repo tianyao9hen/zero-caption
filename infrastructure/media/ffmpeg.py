@@ -69,7 +69,11 @@ class FFmpegAdapter:
         return candidates
 
     def extract_audio(self, source_path: Path, output_path: Path) -> Path:
-        """把视频中的音频抽取到指定目标文件。"""
+        """把视频中的音频抽取到指定目标文件。
+
+        识别缓存统一转换成 `16kHz` 单声道。Whisper 最终也会使用这个格式，
+        提前转换可以显著减小长视频的临时文件，同时避免每个识别块重复下混。
+        """
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         executable = self.resolve_executable()
@@ -84,21 +88,7 @@ class FFmpegAdapter:
             str(output_path),
         ]
 
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            # 源视频或目标音频路径可能包含中文、日文等字符；FFmpeg 输出
-            # 使用 UTF-8 解码，避免 Windows 默认代码页无法读取日志而中断任务。
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            # 安装版是无控制台的桌面程序。Windows 默认启动控制台型
-            # `FFmpeg` 时会额外弹出终端窗口，因此必须显式隐藏子进程窗口。
-            creationflags=(
-                subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            ),
-        )
+        completed = self._run(command)
         if completed.returncode != 0:
             # FFmpeg 失败时可能已经写出一个不完整的 WAV。残缺文件不能
             # 留在 `temp/` 中，否则下次重试会被误判为可复用的成功缓存。
@@ -111,12 +101,67 @@ class FFmpegAdapter:
 
         return output_path
 
+    def extract_audio_segment(
+        self,
+        source_path: Path,
+        output_path: Path,
+        start_ms: int,
+        end_ms: int,
+    ) -> Path:
+        """把音频的指定时间范围裁剪成独立识别文件。
+
+        参数使用原始音频时间轴上的毫秒值。输出失败时会删除不完整文件，
+        避免任务恢复时把半成品误当成可复用缓存。
+        """
+
+        if start_ms < 0 or end_ms <= start_ms:
+            raise ValueError("音频片段时间范围无效。")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        executable = self.resolve_executable()
+        duration_seconds = (end_ms - start_ms) / 1000
+        command = [
+            str(executable),
+            "-y",
+            "-ss",
+            f"{start_ms / 1000:.3f}",
+            "-i",
+            str(source_path),
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-vn",
+            *self._build_codec_args(output_path),
+            str(output_path),
+        ]
+        completed = self._run(command)
+        if completed.returncode != 0:
+            output_path.unlink(missing_ok=True)
+            raise FFmpegError(
+                command=command,
+                returncode=completed.returncode,
+                stderr=completed.stderr or completed.stdout,
+            )
+        return output_path
+
     def _build_codec_args(self, output_path: Path) -> list[str]:
         """根据目标扩展名选择最小可用编码参数。"""
 
         suffix = output_path.suffix.lower()
         if suffix == ".wav":
-            return ["-acodec", "pcm_s16le"]
+            return ["-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le"]
         if suffix == ".flac":
-            return ["-acodec", "flac"]
+            return ["-ac", "1", "-ar", "16000", "-acodec", "flac"]
         raise ValueError(f"暂不支持的音频输出格式: {output_path.suffix}")
+
+    def _run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        """执行一次 FFmpeg 命令并统一 Windows 子进程参数。"""
+
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+        )

@@ -40,6 +40,7 @@ from infrastructure.asr import CTranslate2HardwareProbe, FasterWhisperEngine
 from infrastructure.logging.setup import configure_logging
 from infrastructure.media.ffmpeg import FFmpegAdapter
 from infrastructure.media.ffprobe import FFprobeAdapter
+from infrastructure.media.segmenter import AudioSegmenter
 from infrastructure.storage.fingerprint import Sha256FileFingerprintCalculator
 from infrastructure.storage.workspace import WorkspaceManager
 from infrastructure.storage.sqlite_db import SQLiteDatabase
@@ -228,13 +229,19 @@ class AppContainer:
             project_workspace=self.workspace,
             fingerprint_calculator=Sha256FileFingerprintCalculator(),
         )
+        ffmpeg_adapter = FFmpegAdapter(self.settings.runtime.ffmpeg_path)
         transcribe_video = TranscribeVideo(
             project_repository=self.project_repository,
             task_repository=self.task_repository,
             subtitle_repository=self.subtitle_repository,
             event_publisher=self.progress_bus,
             media_probe=FFprobeAdapter(self.settings.runtime.ffprobe_path),
-            audio_extractor=FFmpegAdapter(self.settings.runtime.ffmpeg_path),
+            audio_extractor=ffmpeg_adapter,
+            audio_segment_extractor=ffmpeg_adapter,
+            audio_segment_planner=AudioSegmenter(
+                chunk_duration_ms=300_000,
+                overlap_ms=2_000,
+            ),
             asr_engine=asr_engine,
             subtitle_formatter=SubtitleFormatter(),
             subtitle_aligner=SubtitleAligner(),

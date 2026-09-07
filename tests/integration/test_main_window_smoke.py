@@ -75,7 +75,7 @@ def test_main_window_downloads_completed_translation_without_changing_source(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """下载按钮应在用户选定目录后生成新文件，并保留原视频内容。"""
+    """下载完成后按钮应恢复可用，并允许把同一成品再次下载到其他目录。"""
 
     # arrange：准备一个已经完成翻译的项目，下载走真实窗口信号和外挂导出器，
     # 但不需要启动识别模型、翻译网络请求或 `FFmpeg`。
@@ -118,11 +118,16 @@ def test_main_window_downloads_completed_translation_without_changing_source(
         project.target_language,
         [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
     )
-    download_directory = tmp_path / "downloads"
-    download_directory.mkdir()
+    first_download_directory = tmp_path / "downloads-first"
+    second_download_directory = tmp_path / "downloads-second"
+    first_download_directory.mkdir()
+    second_download_directory.mkdir()
+    selected_directories = iter(
+        [first_download_directory, second_download_directory]
+    )
     monkeypatch.setattr(
         "ui.pages.tasks_page.QFileDialog.getExistingDirectory",
-        lambda *_args, **_kwargs: str(download_directory),
+        lambda *_args, **_kwargs: str(next(selected_directories)),
     )
     window = container.create_main_window()
 
@@ -134,15 +139,28 @@ def test_main_window_downloads_completed_translation_without_changing_source(
     while window._pipeline_runners and monotonic() < deadline:
         app.processEvents()
 
-    # assert：外挂模式只下载字幕，原视频既不复制也不被覆盖或改写。
-    output_video = download_directory / "lesson-字幕.mp4"
-    output_subtitle = download_directory / "lesson-字幕.srt"
+    # assert：第一次下载结束后按钮必须恢复可用，外挂模式只生成字幕文件。
+    first_output_video = first_download_directory / "lesson-字幕.mp4"
+    first_output_subtitle = first_download_directory / "lesson-字幕.srt"
     assert window._pipeline_runners == {}
-    assert output_video.exists() is False
-    assert "你好" in output_subtitle.read_text(encoding="utf-8")
+    assert window.tasks_page.download_button.isEnabled() is True
+    assert first_output_video.exists() is False
+    assert "你好" in first_output_subtitle.read_text(encoding="utf-8")
     assert source_video.read_bytes() == source_content
     assert "下载完成" in window.status_widget.label.text()
-    assert str(output_subtitle) in window.status_widget.label.text()
+    assert str(first_output_subtitle) in window.status_widget.label.text()
+
+    # act：再次点击同一个项目的下载按钮，并选择另一个目录。
+    window.tasks_page.download_button.click()
+    deadline = monotonic() + 3
+    while window._pipeline_runners and monotonic() < deadline:
+        app.processEvents()
+
+    # assert：第二次下载同样成功，按钮仍可继续使用。
+    second_output_subtitle = second_download_directory / "lesson-字幕.srt"
+    assert window._pipeline_runners == {}
+    assert window.tasks_page.download_button.isEnabled() is True
+    assert "你好" in second_output_subtitle.read_text(encoding="utf-8")
 
     window.close()
     window.deleteLater()

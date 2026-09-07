@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -331,9 +331,10 @@ class MainWindow(QMainWindow):
                 runner,
             )
         )
-        runner.finished.connect(
-            lambda runner=runner: self._release_pipeline_runner(runner)
-        )
+        # `QThread.finished` 直接连接到具名 Qt 槽，由槽通过 `sender()` 找回
+        # 实际结束的线程。这样不依赖每次启动时创建的匿名函数生命周期，
+        # 自包含安装包运行较久后也能稳定移除活动项目并恢复下载按钮。
+        runner.finished.connect(self._handle_pipeline_runner_finished)
         runner_id = id(runner)
         self._pipeline_runners[runner_id] = runner
         self._pipeline_project_ids[runner_id] = project_id
@@ -416,6 +417,20 @@ class MainWindow(QMainWindow):
         self.tasks_page.refresh_history()
         output_path = result.export_record.output_path
         self.status_widget.show_message(f"下载完成：{output_path}")
+
+    @Slot()
+    def _handle_pipeline_runner_finished(self) -> None:
+        """释放发出 `finished` 信号的后台线程，并刷新项目操作状态。
+
+        `sender()` 是 Qt 提供的信号来源查询接口。这里仅负责把来源对象交给
+        统一收尾方法，不承担任务成功、失败或导出结果的业务判断。
+        """
+
+        runner = self.sender()
+        if not isinstance(runner, PipelineRunner):
+            self.logger.warning("收到无法识别来源的视频后台线程结束信号")
+            return
+        self._release_pipeline_runner(runner)
 
     def _release_pipeline_runner(self, runner: PipelineRunner) -> None:
         """释放指定已结束线程，并立即开放一个普通任务并发槽位。"""

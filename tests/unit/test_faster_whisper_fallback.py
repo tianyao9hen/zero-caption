@@ -20,16 +20,46 @@ class FakeModel:
 
 
 class RecordingModel(FakeModel):
-    """记录发布自检是否确实关闭了语音活动过滤。"""
+    """记录识别调用是否传入可靠时间轴参数。"""
+
+    def __init__(self) -> None:
+        self.options: list[dict[str, object]] = []
+
+    def transcribe(self, *args, **kwargs):
+        """保存本次过滤参数后复用轻量识别结果。"""
+
+        self.options.append(dict(kwargs))
+        return super().transcribe(*args, **kwargs)
+
+
+class VadFallbackModel(FakeModel):
+    """第一次模拟 VAD 大量漏检，第二次模拟无 VAD 完整识别。"""
 
     def __init__(self) -> None:
         self.vad_values: list[bool] = []
 
     def transcribe(self, *args, **kwargs):
-        """保存本次过滤参数后复用轻量识别结果。"""
+        """按过滤开关返回不同的保留时长。"""
 
-        self.vad_values.append(kwargs["vad_filter"])
-        return super().transcribe(*args, **kwargs)
+        vad_filter = bool(kwargs["vad_filter"])
+        self.vad_values.append(vad_filter)
+        duration_after_vad = 4.0 if vad_filter else 100.0
+        info = type(
+            "识别信息",
+            (),
+            {
+                "language": "ja",
+                "language_probability": 0.98,
+                "duration": 100.0,
+                "duration_after_vad": duration_after_vad,
+            },
+        )()
+        segment = type(
+            "识别片段",
+            (),
+            {"start": 1.0, "end": 2.0, "text": "こんにちは"},
+        )()
+        return [segment], info
 
 
 def test_cuda_initialization_failure_falls_back_to_cpu(tmp_path) -> None:
@@ -100,11 +130,55 @@ def test_runtime_verification_forces_model_computation_without_vad(tmp_path) -> 
         model_name="medium-model",
         device="cuda",
         compute_type="float16",
+        vad_filter=True,
         model_factory=lambda *args, **kwargs: model,
     )
 
     summary = engine.verify_runtime(audio_path, language="en")
 
-    assert model.vad_values == [False]
+    assert [option["vad_filter"] for option in model.options] == [False]
     assert engine.vad_filter is True
     assert "medium-model + CUDA + float16" in summary
+
+
+def test_default_transcription_uses_word_timestamps_without_vad(tmp_path) -> None:
+    """普通任务应避开会误删对白的默认 VAD，并启用可靠时间轴参数。"""
+
+    model = RecordingModel()
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake audio")
+    engine = FasterWhisperEngine(
+        model_name="medium-model",
+        model_factory=lambda *args, **kwargs: model,
+    )
+
+    engine.transcribe(audio_path, language="ja")
+
+    assert len(model.options) == 1
+    options = model.options[0]
+    assert options["vad_filter"] is False
+    assert options["vad_parameters"] is None
+    assert options["word_timestamps"] is True
+    assert options["condition_on_previous_text"] is False
+    assert options["hallucination_silence_threshold"] == 2.0
+
+
+def test_low_vad_retention_retries_current_audio_without_vad(tmp_path) -> None:
+    """VAD 保留比例异常低时应自动无 VAD 重跑，防止大面积漏字幕。"""
+
+    model = VadFallbackModel()
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"fake audio")
+    engine = FasterWhisperEngine(
+        model_name="medium-model",
+        vad_filter=True,
+        model_factory=lambda *args, **kwargs: model,
+    )
+
+    segments = engine.transcribe(audio_path, language="ja")
+
+    assert model.vad_values == [True, False]
+    assert len(segments) == 1
+    assert segments[0].start_ms == 1_000
+    assert segments[0].end_ms == 2_000
+    assert "VAD 仅保留 4.0% 音频" in engine.runtime_summary()

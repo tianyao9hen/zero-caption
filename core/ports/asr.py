@@ -50,6 +50,16 @@ class AsrRuntimeReporter(Protocol):
 
 
 @runtime_checkable
+class AsrCacheKeyProvider(Protocol):
+    """识别适配器可选的缓存参数签名能力。"""
+
+    def cache_key(self) -> str:
+        """返回会随模型或关键识别参数变化的稳定字符串。"""
+
+        ...
+
+
+@runtime_checkable
 class AsrRuntimeVerifier(Protocol):
     """发布验收可选的真实推理探针能力。"""
 

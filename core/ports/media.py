@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from core.dto.media_dto import MediaProbeResultDTO
+from core.dto.media_dto import AudioSegmentRangeDTO, MediaProbeResultDTO
 
 
 class MediaProbe(Protocol):
@@ -27,5 +27,29 @@ class AudioExtractor(Protocol):
 
     def extract_audio(self, source_path: Path, output_path: Path) -> Path:
         """从源视频抽取音频，并返回实际生成的文件路径。"""
+
+        ...
+
+
+class AudioSegmentExtractor(Protocol):
+    """从本地音频中裁剪指定绝对时间范围的能力。"""
+
+    def extract_audio_segment(
+        self,
+        source_path: Path,
+        output_path: Path,
+        start_ms: int,
+        end_ms: int,
+    ) -> Path:
+        """裁剪音频片段并返回实际生成的文件路径。"""
+
+        ...
+
+
+class AudioSegmentPlanner(Protocol):
+    """按总时长规划长音频固定窗口的能力。"""
+
+    def plan_segments(self, total_duration_ms: int) -> list[AudioSegmentRangeDTO]:
+        """返回相对于原始音频时间轴的有序片段范围。"""
 
         ...

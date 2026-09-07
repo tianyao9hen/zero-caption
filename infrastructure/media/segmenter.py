@@ -7,15 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass(slots=True)
-class AudioSegmentRange:
-    """表示一段音频在原始时间轴上的起止范围。"""
-
-    start_ms: int
-    end_ms: int
+from core.dto.media_dto import AudioSegmentRangeDTO
 
 
 class AudioSegmenter:
@@ -45,7 +37,7 @@ class AudioSegmenter:
         self.chunk_duration_ms = chunk_duration_ms
         self.overlap_ms = overlap_ms
 
-    def plan_segments(self, total_duration_ms: int) -> list[AudioSegmentRange]:
+    def plan_segments(self, total_duration_ms: int) -> list[AudioSegmentRangeDTO]:
         """按原始时间轴规划音频切块范围。
 
         返回值中的每一段都保留原始音频的绝对时间偏移，
@@ -55,7 +47,7 @@ class AudioSegmenter:
         if total_duration_ms <= 0:
             return []
 
-        segments: list[AudioSegmentRange] = []
+        segments: list[AudioSegmentRangeDTO] = []
         step_ms = self.chunk_duration_ms - self.overlap_ms
         start_ms = 0
 
@@ -64,7 +56,7 @@ class AudioSegmenter:
         # 第三步：否则按去掉重叠后的步长推进下一段起点。
         while start_ms < total_duration_ms:
             end_ms = min(start_ms + self.chunk_duration_ms, total_duration_ms)
-            segments.append(AudioSegmentRange(start_ms=start_ms, end_ms=end_ms))
+            segments.append(AudioSegmentRangeDTO(start_ms=start_ms, end_ms=end_ms))
 
             if end_ms >= total_duration_ms:
                 break
