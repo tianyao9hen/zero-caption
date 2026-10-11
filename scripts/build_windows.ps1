@@ -27,7 +27,19 @@ function Invoke-Python {
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Arguments
   )
-  & $PythonPath @Arguments
+  # `PyInstaller` 等命令行工具会把正常的 `INFO` 进度写到标准错误流。
+  # 全局 `$ErrorActionPreference = 'Stop'` 会让 PowerShell 把这些 stderr
+  # 输出当成终止错误（`NativeCommandError`）并中断构建，即使命令本身成功。
+  # 这里在调用外部程序期间临时降级为 `Continue`，程序结束后恢复原设置，
+  # 真实成败仍然只用 `$LASTEXITCODE` 判断。
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & $PythonPath @Arguments
+  }
+  finally {
+    $ErrorActionPreference = $previousPreference
+  }
   if ($LASTEXITCODE -ne 0) {
     throw ('Python command failed, exit code: ' + $LASTEXITCODE)
   }
@@ -43,7 +55,15 @@ if (-not $SkipModelDownload) {
   Invoke-Python -Arguments $modelArguments
 }
 
-$bundledModels = @(& $PythonPath -c "from config.settings import load_settings; print('\n'.join(load_settings('config/default.toml').engine.asr.bundled_models))")
+# 读取随包发布的模型清单。同样临时降级错误策略，避免解释器告警被当成失败。
+$previousPreference = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  $bundledModels = @(& $PythonPath -c "from config.settings import load_settings; print('\n'.join(load_settings('config/default.toml').engine.asr.bundled_models))")
+}
+finally {
+  $ErrorActionPreference = $previousPreference
+}
 if (-not $bundledModels) {
   throw 'bundled ASR model list is empty'
 }
@@ -88,7 +108,15 @@ if (-not $SkipInstallerBuild) {
     throw 'Inno Setup compiler was not prepared successfully'
   }
 
-  & $compiler (Join-Path $repoRoot 'installer\ZeroCaption.iss')
+  # 编译器同样会把进度信息写到标准错误流，沿用上面的降级策略避免误判。
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & $compiler (Join-Path $repoRoot 'installer\ZeroCaption.iss')
+  }
+  finally {
+    $ErrorActionPreference = $previousPreference
+  }
   if ($LASTEXITCODE -ne 0) {
     throw ('installer build failed, exit code: ' + $LASTEXITCODE)
   }
