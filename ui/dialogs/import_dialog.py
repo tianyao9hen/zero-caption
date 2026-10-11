@@ -115,8 +115,10 @@ class ImportDialog(QDialog):
         self.processing_mode_combo.currentIndexChanged.connect(
             self._sync_processing_controls
         )
+        # 下载模式会改变“用户在什么时候需要等待”：烧录要先把成品做好。
+        # 因此两个下拉框都要触发同一套表单同步。
         self.export_mode_combo.currentIndexChanged.connect(
-            self._sync_output_preview
+            self._sync_processing_controls
         )
         self.video_edit.textChanged.connect(self._sync_output_preview)
         self.output_directory_edit.textChanged.connect(
@@ -248,9 +250,10 @@ class ImportDialog(QDialog):
         self.output_directory_label.setVisible(not full_pipeline)
         self.output_directory_widget.setVisible(not full_pipeline)
         if full_pipeline:
+            # 烧录与外挂的等待点不同：烧录会在任务目录里先把成品做好，
+            # 因此这里要把真正的等待位置说清楚，避免用户以为“已创建”就是“已就绪”。
             self.processing_hint_label.setText(
-                "创建后会在后台依次执行识别和逐句翻译；翻译完成后，"
-                "请在任务页点击“下载成品”并选择保存目录。"
+                self._full_pipeline_hint()
             )
         else:
             self.processing_hint_label.setText(
@@ -258,6 +261,25 @@ class ImportDialog(QDialog):
                 "视频、音频和识别数据不会上传到大模型。"
             )
         self._sync_output_preview()
+
+    def _current_export_mode(self) -> ExportMode:
+        """返回当前选择的下载模式。"""
+
+        return ExportMode(self.export_mode_combo.currentData())
+
+    def _full_pipeline_hint(self) -> str:
+        """根据下载模式解释完整流程的等待点。"""
+
+        if self._current_export_mode() is ExportMode.BURN_IN:
+            return (
+                "创建后会在后台依次执行识别、逐句翻译，并在任务目录中"
+                "直接烧录成品视频；成品生成完成后，在任务页点击"
+                "“下载成品”选择保存目录即可，不需要再等待重新编码。"
+            )
+        return (
+            "创建后会在后台依次执行识别和逐句翻译；翻译完成后，"
+            "请在任务页点击“下载成品”并选择保存目录。"
+        )
 
     def output_path(self) -> Path | None:
         """根据任务类型返回用户可见主要成果的完整路径。
@@ -290,6 +312,20 @@ class ImportDialog(QDialog):
             self.processing_mode_combo.currentData()
         )
         if processing_mode is ProcessingMode.FULL_PIPELINE:
+            if self._current_export_mode() is ExportMode.BURN_IN:
+                source_text = self.video_edit.text().strip()
+                if source_text:
+                    source_path = Path(source_text)
+                    suffix = source_path.suffix or ".mp4"
+                    self.output_preview_label.setText(
+                        f"任务目录内自动生成：{source_path.stem}-烧录成品{suffix}"
+                        "（下载时选择保存目录）"
+                    )
+                else:
+                    self.output_preview_label.setText(
+                        "选择视频后显示任务目录内将自动生成的成品文件名"
+                    )
+                return
             self.output_preview_label.setText(
                 "译文字幕保存在项目中；完成后由“下载成品”选择目录"
             )

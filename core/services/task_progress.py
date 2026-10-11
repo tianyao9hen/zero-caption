@@ -50,7 +50,9 @@ def overall_video_progress(
     # 用户主动下载成品不属于“视频处理任务”的总进度。无论下载正在生成、
     # 已成功还是失败，字幕处理主链路都已经完成，因此总进度保持 100%，
     # 下载本身的结果由任务状态和消息单独表达。
-    if task_type == "export_video":
+    # 任务创建时后台预生成成品（`prepare_product`）同样保持 100%：它跑在
+    # 翻译之后，主链路已经完成，真实百分比显示在“当前步骤”消息里。
+    if task_type in {"export_video", "prepare_product"}:
         return 100
 
     if (

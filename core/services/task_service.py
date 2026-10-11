@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.domain.entities import Project
-from core.domain.enums import ProcessingMode, ProjectStatus, TaskStatus
+from core.domain.enums import ExportMode, ProcessingMode, ProjectStatus, TaskStatus
 from core.dto.project_dto import CreateProjectInput, CreateProjectResult
 from core.dto.pipeline_dto import ProcessVideoInput, ProcessVideoResult
 from core.dto.subtitle_dto import (
@@ -146,7 +146,8 @@ class TaskService:
         """按原字幕顺序返回项目的原文和译文配对结果。
 
         该查询只读取结构化字幕，不读取视频或音频。尚未产生译文的原文也会
-        返回，界面可以据此明确展示“尚无译文”，但不会允许把它当成结果修订。
+        返回，界面可以据此明确展示“尚无译文”或自动翻译失败原因，
+        并允许用户补录译文。
         """
 
         project_repository = self._require_dependency(
@@ -169,6 +170,12 @@ class TaskService:
                 project.target_language,
             )
         }
+        failures_by_id = {
+            failure.segment_id: failure
+            for failure in subtitle_repository.get_translation_failures(
+                project_id, project.target_language
+            )
+        }
         total_segments = len(source_segments)
         return [
             SubtitleTranslationItemDTO(
@@ -182,6 +189,11 @@ class TaskService:
                 translated_text=(
                     translated_by_id[source.segment_id].text
                     if source.segment_id in translated_by_id
+                    else ""
+                ),
+                translation_error=(
+                    failures_by_id[source.segment_id].error_message
+                    if source.segment_id in failures_by_id
                     else ""
                 ),
             )
@@ -360,9 +372,7 @@ class TaskService:
         if translation.subtitle_path is None:
             raise RuntimeError("翻译完成后没有生成正式字幕文件。")
 
-        # 第四步：译文字幕是自动处理流程的最终产物。此处只完成项目状态，
-        # 不再自动复制或改写视频；用户稍后从任务页点击“下载成品”时，才会
-        # 选择外部目录并显式调用导出用例。这样源视频始终只作为只读输入。
+        # 第四步：译文字幕已经生成，项目的核心处理到此结束。
         project = created.project
         if self.project_repository is not None:
             persisted_project = self.project_repository.get_by_id(
@@ -377,11 +387,83 @@ class TaskService:
         if self.project_repository is not None:
             self.project_repository.save(project)
         created.project = project
+
+        # 第五步：烧录模式在工作区里预先烧录一份成品视频。这样用户稍后点击
+        # “下载成品”时只需要复制文件，而不是在对话框关闭后再等几十分钟。
+        # 这一步属于加速交付的可选动作，失败不应推翻已经完成的字幕结果。
+        prepared = self._prepare_burn_in_product(
+            project.project_id,
+            request.export_mode,
+        )
+        if self.project_repository is not None:
+            # 预生成会再次改动项目记录（成功时登记成品路径，失败时写入原因）。
+            # 这里无条件重新读取一次，保证返回给调用方的项目快照是最新的，
+            # 而不是第四个步骤结束那一刻的旧副本。
+            final_project = self.project_repository.get_by_id(project.project_id)
+            if final_project is not None:
+                created.project = final_project
+
         return ProcessVideoResult(
             project=created,
             transcription=transcription,
             translation=translation,
+            export=prepared,
         )
+
+    def _prepare_burn_in_product(
+        self,
+        project_id: str,
+        export_mode: ExportMode,
+    ) -> ExportVideoResult | None:
+        """在烧录模式下于项目目录内预生成成品视频。
+
+        参数：
+            project_id：刚刚完成翻译的项目编号。
+            export_mode：用户在创建任务时选择的导出模式。
+
+        返回：
+            `None` 表示没有预生成（未选择烧录、用例缺失或已有新鲜成品）；
+            否则返回本次预生成结果，供调用方展示成品路径。
+
+        预生成失败时这里会把异常吞掉，只把原因写进项目的错误备注。
+        因为译文和字幕已经落盘，用户仍然可以手动下载，把整个任务标记为
+        失败只会让用户以为字幕结果也丢了。
+        """
+
+        if export_mode is not ExportMode.BURN_IN:
+            return None
+        if self.reexport_project_usecase is None:
+            return None
+        if not self.reexport_project_usecase.has_prepared_product(
+            project_id,
+            ExportMode.BURN_IN,
+        ):
+            request = ReexportProjectInput(
+                project_id=project_id,
+                mode=ExportMode.BURN_IN,
+                prepare_project_product=True,
+            )
+            try:
+                return self.reexport_project(request)
+            except Exception as exc:
+                self._note_prepare_failure(project_id, exc)
+                return None
+
+            # 已经有现成成品，不需要重复烧录。这里不算失败：只是本次没有
+            # 新的导出结果需要返回给调用方。
+            return None
+
+    def _note_prepare_failure(self, project_id: str, exc: Exception) -> None:
+        """把预生成失败原因记到项目备注，同时保持任务为已完成状态。"""
+
+        if self.project_repository is None:
+            return
+        project = self.project_repository.get_by_id(project_id)
+        if project is None:
+            return
+        project.mark_completed()
+        project.last_error = f"成品预生成失败：{exc}"
+        self.project_repository.save(project)
 
     def list_video_tasks(self, limit: int = 50) -> list[VideoTaskHistoryDTO]:
         """按视频项目聚合并返回最近任务记录。
@@ -408,9 +490,12 @@ class TaskService:
             "任务仓储",
         )
 
-        # 第一步：项目仓储已经按更新时间倒序返回记录，先截断可以避免
-        # 历史数量很大时为不可见项目继续读取任务明细。
-        projects = project_repository.list_all()[:limit]
+        # 第一步：任务页按创建顺序展示和执行任务，因此这里先拿到按创建
+        # 时间正序排列的项目。历史很多时只保留最近创建的若干条，避免为
+        # 不可见项目继续读取任务明细。
+        projects = project_repository.list_all()
+        if len(projects) > limit:
+            projects = projects[-limit:]
         history: list[VideoTaskHistoryDTO] = []
 
         # 第二步：同一个视频会产生多个内部任务，界面只取最新一条作为摘要。
@@ -462,6 +547,9 @@ class TaskService:
                     ),
                     created_at=project.created_at,
                     updated_at=project.updated_at,
+                    # 界面据此提示“成品已就绪”：烧录任务自动预生成结束后，
+                    # 用户点击下载只是复制文件，不需要再次等待重新编码。
+                    prepared_output_path=project.prepared_output_path,
                 )
             )
         return history

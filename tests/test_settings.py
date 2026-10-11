@@ -14,6 +14,7 @@ from config.settings import (
     TranslationSettings,
     load_settings,
     save_engine_settings,
+    save_task_settings,
     save_translation_settings,
     save_workspace_settings,
 )
@@ -332,3 +333,37 @@ def test_workspace_and_engine_saves_preserve_each_other(tmp_path) -> None:
     assert reloaded.runtime.model_cache_dir == selected_model_cache
     assert reloaded.engine.asr.model_name == "medium"
     assert reloaded.engine.translation.system_prompt == "保留工作区的测试提示词"
+
+
+def test_task_concurrency_is_persisted_and_preserved_by_other_saves(tmp_path) -> None:
+    """并发数应能保存，并在后续保存工作区或引擎时不丢失。"""
+
+    # arrange：用户把识别并发数调整为 3。
+    target = tmp_path / "settings.toml"
+    save_task_settings(3, target)
+
+    # act：随后再切换工作区并调整识别模型。
+    save_workspace_settings(tmp_path / "workspace", target)
+    save_engine_settings(
+        EngineSettings(
+            asr=AsrSettings(model_name="medium", device="cpu", compute_type="int8"),
+            translation=TranslationSettings(system_prompt="保留并发设置的提示词"),
+        ),
+        target,
+    )
+    reloaded = load_settings(user_path=target)
+
+    # assert：并发数、工作区和引擎设置都完整保留。
+    assert reloaded.task.max_heavy_concurrency == 3
+    # 高资源并发数不得大于普通流程并发数，否则配置加载会直接失败。
+    assert reloaded.task.max_concurrency >= reloaded.task.max_heavy_concurrency
+    assert reloaded.workspace_root == tmp_path / "workspace"
+    assert reloaded.engine.asr.model_name == "medium"
+
+
+def test_save_task_settings_rejects_nonpositive_concurrency(tmp_path) -> None:
+    """零或负并发数会让所有任务永久等待，必须在写入前就拒绝。"""
+
+    with pytest.raises(ValueError, match="高资源任务并发数必须大于 0"):
+        save_task_settings(0, tmp_path / "settings.toml")
+

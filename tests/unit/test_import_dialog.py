@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from core.domain.enums import ProcessingMode
+from core.domain.enums import ExportMode, ProcessingMode
 from ui.dialogs.import_dialog import ImportDialog
 
 
@@ -93,6 +93,30 @@ def test_import_dialog_browses_result_directory_and_updates_preview(
     assert dialog.output_directory_edit.text() == str(selected_directory)
     assert dialog.output_path() == selected_directory / "course.srt"
     assert str(selected_directory / "course.srt") in dialog.output_preview_label.text()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_import_dialog_explains_burn_in_preparation_and_product_name(
+    tmp_path,
+) -> None:
+    """选择烧录字幕时，表单应说明成品会先在任务目录里生成。"""
+
+    app = QApplication.instance() or QApplication([])
+    source_video = tmp_path / "course.mp4"
+    source_video.write_bytes(b"video")
+    dialog = ImportDialog(translation_configured=True)
+    dialog.video_edit.setText(str(source_video))
+
+    burn_in_index = dialog.export_mode_combo.findData(ExportMode.BURN_IN.value)
+    dialog.export_mode_combo.setCurrentIndex(burn_in_index)
+    app.processEvents()
+
+    # assert：提示和预览都明确指向“任务目录内自动生成成品”。
+    assert "任务目录" in dialog.processing_hint_label.text()
+    assert "烧录" in dialog.processing_hint_label.text()
+    assert "course-烧录成品.mp4" in dialog.output_preview_label.text()
+
     dialog.deleteLater()
     app.processEvents()
 

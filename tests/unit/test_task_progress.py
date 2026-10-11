@@ -56,3 +56,18 @@ def test_download_operation_never_reduces_completed_pipeline_progress() -> None:
         task_status="failed",
         task_progress=96,
     ) == 100
+
+
+def test_background_preparation_never_reduces_completed_pipeline_progress() -> None:
+    """创建任务时后台预生成成品属于最后一道附加步骤，不应拉低总进度。"""
+
+    assert overall_video_progress(
+        task_type="prepare_product",
+        task_status="running",
+        task_progress=100,
+    ) == 100
+    assert overall_video_progress(
+        task_type="prepare_product",
+        task_status="failed",
+        task_progress=100,
+    ) == 100

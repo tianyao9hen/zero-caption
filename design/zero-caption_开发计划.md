@@ -239,7 +239,7 @@
 
 - 修改：`ui/windows/main_window.py`
 - 修改：`ui/dialogs/import_dialog.py`
-- 修改：`ui/pages/projects_page.py`
+- 修改：`ui/pages/projects_page.py`（后续已移除，项目信息统一收敛到任务页，见 `docs/user_guide.md`）
 - 修改：`ui/pages/tasks_page.py`
 - 修改：`ui/pages/settings_page.py`
 - 修改：`ui/widgets/status_bar.py`
@@ -254,7 +254,7 @@
 ### 6.3 任务拆解
 
 1. 让导入对话框真正收集视频路径、源语言、目标语言和导出模式，而不再只是占位弹窗。
-2. 项目页显示项目列表、当前状态、源文件、输出目录和最近任务。
+2. 项目页显示项目列表、当前状态、源文件、输出目录和最近任务。该页面后续因与任务页职责重叠而删除，项目信息统一由任务页承担。
 3. 任务页显示总进度、当前步骤、当前块进度、错误摘要与重试入口。
 4. 设置页承载引擎选择、API 配置、语言默认值、CPU/GPU 配置和缓存策略。
 5. 通过信号/槽或进度总线把后台状态推送到页面层，避免 UI 直接轮询基础设施。

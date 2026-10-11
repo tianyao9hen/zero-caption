@@ -28,7 +28,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config.settings import AsrSettings, EngineSettings, Settings, TranslationSettings
+from config.settings import (
+    AsrSettings,
+    EngineSettings,
+    Settings,
+    TaskSettings,
+    TranslationSettings,
+)
 from core.dto.asr_dto import AsrHardwareInfoDTO
 
 
@@ -38,6 +44,7 @@ class SettingsPage(QWidget):
     # `Signal` 是 Qt 的事件通知机制。这里传递普通 Python 对象，
     # 让页面只负责收集输入，而不需要知道配置最终写到哪个目录。
     save_requested = Signal(object)
+    task_concurrency_change_requested = Signal(int)
     workspace_change_requested = Signal(object)
     test_requested = Signal(object, str)
 
@@ -53,6 +60,14 @@ class SettingsPage(QWidget):
         self.asr_hardware_info = asr_hardware_info
         self.export_settings = settings.engine.export
         self.bundled_models = settings.engine.asr.bundled_models
+        self.task_settings = settings.task
+        # 下面两个成员必须在创建任何表单控件之前就绪：控件在构造阶段设置
+        # 初值时同样会发出信号，信号处理函数会立刻读取这两个属性。
+        self._applying_saved_settings = False
+        self.feedback_label = QLabel("")
+        self.feedback_label.setMinimumHeight(24)
+        self.feedback_label.setWordWrap(True)
+        self.feedback_label.setText("修改引擎设置后会自动保存。")
 
         content = QWidget()
         content.setMaximumWidth(760)
@@ -61,6 +76,7 @@ class SettingsPage(QWidget):
         content_layout.setSpacing(8)
 
         content_layout.addWidget(self._build_runtime_group(settings, asr_hardware_info))
+        content_layout.addWidget(self._build_concurrency_group(settings.task))
         content_layout.addWidget(self._build_asr_group(settings.engine.asr))
         content_layout.addWidget(self._build_translation_group(settings.engine.translation))
         content_layout.addWidget(self._build_prompt_group(settings.engine.translation))
@@ -70,17 +86,12 @@ class SettingsPage(QWidget):
         # 引擎设置使用短延迟自动保存。文本输入会连续触发很多次变化，
         # 单次计时器只在用户停止编辑后提交最后一份完整配置，避免每输入
         # 一个字符就重写配置文件和重新装配服务。
-        self._applying_saved_settings = False
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
         self._auto_save_timer.setInterval(500)
         self._auto_save_timer.timeout.connect(self._emit_save_requested)
         self._connect_auto_save_signals()
 
-        self.feedback_label = QLabel("")
-        self.feedback_label.setMinimumHeight(24)
-        self.feedback_label.setWordWrap(True)
-        self.feedback_label.setText("修改引擎设置后会自动保存。")
         content_layout.addWidget(self.feedback_label)
         content_layout.addStretch(1)
 
@@ -143,6 +154,16 @@ class SettingsPage(QWidget):
         """工作区切换成功后，把实际生效的绝对路径同步回输入框。"""
 
         self.workspace_field.setText(str(workspace_root))
+
+    def apply_saved_task_settings(self, settings: TaskSettings) -> None:
+        """并发数保存成功后同步回表单，避免界面仍显示旧值。"""
+
+        self._applying_saved_settings = True
+        try:
+            self.task_settings = settings
+            self.recognition_parallelism_spin.setValue(settings.max_heavy_concurrency)
+        finally:
+            self._applying_saved_settings = False
 
     def apply_saved_engine_settings(self, settings: EngineSettings) -> None:
         """保存成功后同步表单，确保展示的是实际生效配置。"""
@@ -270,6 +291,50 @@ class SettingsPage(QWidget):
             return
         self.feedback_label.clear()
         self.workspace_change_requested.emit(workspace_root)
+
+    def _build_concurrency_group(self, settings: TaskSettings) -> QGroupBox:
+        """创建识别与成品导出并发数设置分组。
+
+        识别会长时间占用显卡和处理器。这里允许用户选择同时处理的视频数量，
+        任务页会按创建顺序把等待中的任务依次放进空闲槽位。
+        """
+
+        group = QGroupBox("任务并发")
+        form = self._new_form_layout()
+
+        self.recognition_parallelism_spin = QSpinBox()
+        self.recognition_parallelism_spin.setObjectName(
+            "recognitionParallelismSpin"
+        )
+        # 上限设为 4 是为了避免用户在共享显卡的机器上把电脑彻底跑满。
+        # 更高的并发通常不会更快，反而会因为显存和磁盘争抢拖慢全部任务。
+        self.recognition_parallelism_spin.setRange(1, 4)
+        self.recognition_parallelism_spin.setValue(settings.max_heavy_concurrency)
+        self.recognition_parallelism_spin.setToolTip(
+            "同时执行识别和成品导出的视频数量，按任务创建顺序排队。"
+        )
+        self.recognition_parallelism_spin.valueChanged.connect(
+            self._emit_task_concurrency_change
+        )
+
+        self.parallelism_hint_label = QLabel(
+            "识别和成品下载各自独立排队；提高并发数会明显占用显卡和处理器。"
+        )
+        self.parallelism_hint_label.setWordWrap(True)
+
+        form.addRow("同时处理视频数", self.recognition_parallelism_spin)
+        form.addRow("说明", self.parallelism_hint_label)
+        group.setLayout(form)
+        return group
+
+    def _emit_task_concurrency_change(self, value: int) -> None:
+        """把并发数变化交给主窗口保存并立即生效。"""
+
+        if self._applying_saved_settings:
+            return
+        self.feedback_label.setStyleSheet("color: #315a8a;")
+        self.feedback_label.setText("正在保存并发数……")
+        self.task_concurrency_change_requested.emit(int(value))
 
     def _build_asr_group(self, settings: AsrSettings) -> QGroupBox:
         """创建本地识别模型、设备、精度和回退设置。"""

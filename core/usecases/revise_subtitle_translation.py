@@ -165,9 +165,8 @@ class ReviseSubtitleTranslation:
             project.target_language,
         )
         source_ids = [segment.segment_id for segment in source_segments]
-        translated_ids = {segment.segment_id for segment in translated_segments}
-        if segment_id not in source_ids or segment_id not in translated_ids:
-            raise ValueError("未找到可修订的字幕翻译结果。")
+        if segment_id not in source_ids:
+            raise ValueError("未找到可修订的字幕。")
         return (
             project,
             source_segments,
@@ -237,6 +236,11 @@ class ReviseSubtitleTranslation:
                 ordered_segments,
             )
             database_updated = True
+            self.subtitle_repository.clear_translation_failure(
+                project.project_id,
+                replacement.segment_id,
+                project.target_language,
+            )
             temporary_path.replace(subtitle_path)
         except Exception:
             # 正式文件替换失败时把仓储恢复为旧列表，保证界面重启后不会

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.domain.entities import Task
@@ -78,6 +78,17 @@ class TranslateSubtitlesResult:
     translated_segments: list[SubtitleSegmentDTO]
     subtitle_path: Path | None = None
     reused_translation: bool = False
+    failed_segments: list["TranslationFailureDTO"] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationFailureDTO:
+    """记录单条字幕翻译耗尽重试后的异常，供恢复和界面展示。"""
+
+    project_id: str
+    segment_id: str
+    target_language: str
+    error_message: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +108,7 @@ class TranslationProgressDTO:
     segment_id: str = ""
     start_ms: int = 0
     end_ms: int = 0
+    translation_error: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +127,7 @@ class SubtitleTranslationItemDTO:
     end_ms: int
     source_text: str
     translated_text: str
+    translation_error: str = ""
 
 
 @dataclass(slots=True)

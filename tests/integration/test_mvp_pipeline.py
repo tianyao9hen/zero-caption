@@ -415,25 +415,26 @@ def test_task_service_retries_existing_project_and_reuses_completed_steps(
         context="课程术语：world 译为世界",
     )
 
-    # act：首次处理在第二条翻译失败，随后用户显式继续已有项目。
-    with pytest.raises(RuntimeError, match="模拟第二条字幕翻译失败"):
-        service.process_video(request)
+    # act：一条字幕翻译失败时，流程应记录异常并继续处理其余字幕。
+    result = service.process_video(request)
     failed_project = projects.list_all()[0]
     first_project_id = failed_project.project_id
     assert failed_project.translation_context == request.context
     assert len(
         subtitles.get_translated_segments(first_project_id, "zh-CN")
     ) == 1
+    failures = subtitles.get_translation_failures(first_project_id, "zh-CN")
+    assert [failure.segment_id for failure in failures] == ["seg-2"]
+    assert result.translation is not None
+    assert [failure.segment_id for failure in result.translation.failed_segments] == ["seg-2"]
 
-    result = service.retry_video(first_project_id)
-
-    # assert：项目编号不变，高成本本地步骤只执行一次，模型只补请求缺失第二条。
+    # assert：失败句不会中止项目，成功句仍可生成正式字幕文件。
     assert result.final_project.project_id == first_project_id
     assert result.final_project.status is ProjectStatus.COMPLETED
     assert audio_extractor.call_count == 1
     assert asr_engine.call_count == 1
-    assert translator.call_count == 3
+    assert translator.call_count == 2
     assert result.export is None
     assert result.translation.subtitle_path.is_file()
     history = service.list_video_tasks()
-    assert history[0].retry_count == 1
+    assert history[0].retry_count == 0

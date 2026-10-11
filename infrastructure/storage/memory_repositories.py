@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.domain.entities import Project, Task
-from core.dto.subtitle_dto import SubtitleSegmentDTO
+from core.dto.subtitle_dto import SubtitleSegmentDTO, TranslationFailureDTO
 from core.dto.task_dto import ExportRecordDTO
 
 
@@ -32,12 +32,11 @@ class InMemoryProjectRepository:
         return self._items.get(project_id)
 
     def list_all(self) -> list[Project]:
-        """按最近更新时间返回全部项目，行为与 SQLite 仓储保持一致。"""
+        """按创建时间正序返回全部项目，行为与 SQLite 仓储保持一致。"""
 
         return sorted(
             self._items.values(),
-            key=lambda project: project.updated_at,
-            reverse=True,
+            key=lambda project: project.created_at,
         )
 
     def delete(self, project_id: str) -> bool:
@@ -85,6 +84,9 @@ class InMemorySubtitleRepository:
     _translated_items: dict[tuple[str, str], list[SubtitleSegmentDTO]] = field(
         default_factory=dict
     )
+    _translation_failures: dict[tuple[str, str, str], TranslationFailureDTO] = field(
+        default_factory=dict
+    )
 
     def save_source_segments(
         self,
@@ -121,6 +123,19 @@ class InMemorySubtitleRepository:
         """读取指定语言的译文字幕片段。"""
 
         return list(self._translated_items.get((project_id, target_language), []))
+
+    def save_translation_failure(self, failure: TranslationFailureDTO) -> TranslationFailureDTO:
+        self._translation_failures[(failure.project_id, failure.target_language, failure.segment_id)] = failure
+        return failure
+
+    def get_translation_failures(self, project_id: str, target_language: str) -> list[TranslationFailureDTO]:
+        return [
+            failure for (pid, language, _), failure in self._translation_failures.items()
+            if pid == project_id and language == target_language
+        ]
+
+    def clear_translation_failure(self, project_id: str, segment_id: str, target_language: str) -> None:
+        self._translation_failures.pop((project_id, target_language, segment_id), None)
 
 
 @dataclass(slots=True)

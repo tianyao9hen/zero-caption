@@ -17,12 +17,10 @@ from core.dto.subtitle_dto import SubtitleSegmentDTO
 from infrastructure.logging.setup import configure_logging
 from infrastructure.storage.workspace import WorkspaceManager
 
-
 def cpu_hardware_info() -> AsrHardwareInfoDTO:
     """让窗口烟测固定走不依赖 GPU 的 `small + CPU` 路径。"""
 
     return AsrHardwareInfoDTO.cpu_only("测试固定使用 CPU。")
-
 
 def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
     """在无显示器环境中创建主窗口，验证 Qt 控件和依赖注入已接通。"""
@@ -54,13 +52,22 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
     assert header.layout().indexOf(window.brand_logo) >= 0
     assert header.layout().indexOf(window.navigation) >= 0
     assert header.layout().indexOf(window.import_button) >= 0
-    assert window.projects_page is not None
     assert window.tasks_page is not None
-    assert window.navigation.projects_button.isChecked() is True
+    assert window.settings_page is not None
+    # 项目页已被移除，任务页成为默认工作区，页面栈只剩任务页和设置页。
+    assert window.stack.count() == 2
+    assert not hasattr(window, "projects_page")
+    assert window.navigation.tasks_button.isChecked() is True
     assert window.task_service.resource_scheduler is container.resource_scheduler
 
-    # act：程序化切换任务工作区时，页面栈和导航选中状态应同步。
+    # act：程序化切换到设置页时，页面栈和导航选中状态应同步。
     window.navigation.set_current_page(1)
+    app.processEvents()
+
+    assert window.stack.currentWidget() is window.settings_page
+    assert window.navigation.settings_button.isChecked() is True
+
+    window.navigation.set_current_page(0)
     app.processEvents()
 
     assert window.stack.currentWidget() is window.tasks_page
@@ -69,7 +76,6 @@ def test_main_window_can_be_created_offscreen(tmp_path, monkeypatch) -> None:
     window.close()
     window.deleteLater()
     app.processEvents()
-
 
 def test_main_window_downloads_completed_translation_without_changing_source(
     tmp_path,
@@ -132,17 +138,17 @@ def test_main_window_downloads_completed_translation_without_changing_source(
     window = container.create_main_window()
 
     # act：通过任务页按钮发出下载请求，并等待后台导出线程结束。
-    window.navigation.set_current_page(1)
+    window.navigation.set_current_page(0)
     assert window.tasks_page.download_button.isEnabled() is True
     window.tasks_page.download_button.click()
     deadline = monotonic() + 3
-    while window._pipeline_runners and monotonic() < deadline:
+    while window._export_runners and monotonic() < deadline:
         app.processEvents()
 
     # assert：第一次下载结束后按钮必须恢复可用，外挂模式只生成字幕文件。
     first_output_video = first_download_directory / "lesson-字幕.mp4"
     first_output_subtitle = first_download_directory / "lesson-字幕.srt"
-    assert window._pipeline_runners == {}
+    assert window._export_runners == {}
     assert window.tasks_page.download_button.isEnabled() is True
     assert first_output_video.exists() is False
     assert "你好" in first_output_subtitle.read_text(encoding="utf-8")
@@ -153,19 +159,18 @@ def test_main_window_downloads_completed_translation_without_changing_source(
     # act：再次点击同一个项目的下载按钮，并选择另一个目录。
     window.tasks_page.download_button.click()
     deadline = monotonic() + 3
-    while window._pipeline_runners and monotonic() < deadline:
+    while window._export_runners and monotonic() < deadline:
         app.processEvents()
 
     # assert：第二次下载同样成功，按钮仍可继续使用。
     second_output_subtitle = second_download_directory / "lesson-字幕.srt"
-    assert window._pipeline_runners == {}
+    assert window._export_runners == {}
     assert window.tasks_page.download_button.isEnabled() is True
     assert "你好" in second_output_subtitle.read_text(encoding="utf-8")
 
     window.close()
     window.deleteLater()
     app.processEvents()
-
 
 def test_main_window_accepts_more_video_operations_than_configured_capacity(
     tmp_path,
@@ -233,7 +238,6 @@ def test_main_window_accepts_more_video_operations_than_configured_capacity(
     window.deleteLater()
     app.processEvents()
 
-
 def test_main_window_refreshes_task_service_after_translation_settings_save(
     tmp_path,
     monkeypatch,
@@ -288,7 +292,6 @@ def test_main_window_refreshes_task_service_after_translation_settings_save(
     window.close()
     window.deleteLater()
     app.processEvents()
-
 
 def test_main_window_switches_workspace_and_deletes_old_directory_after_confirmation(
     tmp_path,
@@ -350,7 +353,6 @@ def test_main_window_switches_workspace_and_deletes_old_directory_after_confirma
     assert container.database.path == new_workspace / "zero_caption.sqlite3"
     assert window.workspace.root == new_workspace
     assert window.settings_page.workspace_field.text() == str(new_workspace)
-    assert window.projects_page.workspace_label.text() == str(new_workspace)
     assert window.tasks_page.task_service is window.task_service
     assert new_workspace.is_dir()
     assert old_root.exists() is False
@@ -369,7 +371,6 @@ def test_main_window_switches_workspace_and_deletes_old_directory_after_confirma
     for handler in tuple(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
-
 
 def test_main_window_saves_selected_subtitle_edit_in_background(
     tmp_path,
@@ -429,6 +430,211 @@ def test_main_window_saves_selected_subtitle_edit_in_background(
     assert window.tasks_page.subtitle_translation_editor.toPlainText() == "你好，课堂"
     subtitle_path = project.workspace_dir / "subtitles" / "translated-zh-CN.srt"
     assert "你好，课堂" in subtitle_path.read_text(encoding="utf-8")
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+def test_main_window_allows_subtitle_edit_while_other_video_is_running(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """其他视频在后台跑流程时，仍应允许修订当前项目的单条译文。"""
+
+    # arrange：准备两个已完成翻译的项目，其中一个随后进入后台识别状态。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    workspace.ensure_structure()
+    container = AppContainer(
+        settings=Settings(workspace_root=workspace.root),
+        workspace=workspace,
+        logger=logging.getLogger("test-cross-project-subtitle-edit"),
+        asr_hardware_info=cpu_hardware_info(),
+    )
+    for project_id in ("project-idle", "project-busy"):
+        project = Project(
+            project_id=project_id,
+            source_video=tmp_path / f"{project_id}.mp4",
+            source_language="en",
+            target_language="zh-CN",
+            workspace_dir=workspace.projects_dir / project_id,
+        )
+        project.mark_completed()
+        container.project_repository.save(project)
+        task = Task(f"task-{project_id}", project_id, "translate_subtitles")
+        task.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+        container.task_repository.save(task)
+        container.subtitle_repository.save_source_segments(
+            project_id,
+            [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+        )
+        container.subtitle_repository.save_translated_segments(
+            project_id,
+            project.target_language,
+            [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+        )
+    window = container.create_main_window()
+
+    # act：让“另一个视频”一直占着识别线程，再修订空闲项目的译文。
+    release_operation = Event()
+    operation_started = Event()
+
+    def busy_operation() -> object:
+        """模拟另一个视频的识别流程，直到测试主动放行才结束。"""
+
+        operation_started.set()
+        release_operation.wait(timeout=3)
+        return object()
+
+    assert window._start_project_operation(
+        busy_operation,
+        lambda _result: None,
+        "另一个视频正在识别……",
+        project_id="project-busy",
+    )
+    deadline = monotonic() + 3
+    while not operation_started.is_set() and monotonic() < deadline:
+        app.processEvents()
+
+    window.navigation.set_current_page(0)
+    window.tasks_page.task_list.setCurrentRow(0)
+    app.processEvents()
+    assert window.tasks_page.project_id_label.text() == "project-idle"
+    window.tasks_page.subtitle_translation_editor.setPlainText("你好，课堂")
+    window.tasks_page.save_translation_button.click()
+    deadline = monotonic() + 3
+    while window._subtitle_revision_runner is not None and monotonic() < deadline:
+        app.processEvents()
+
+    # assert：空闲项目的译文确实写回，不受另一个视频后台线程影响。
+    saved = container.subtitle_repository.get_translated_segments(
+        "project-idle",
+        "zh-CN",
+    )
+    assert [segment.text for segment in saved] == ["你好，课堂"]
+    assert window._subtitle_revision_runner is None
+
+    release_operation.set()
+    deadline = monotonic() + 3
+    while window._pipeline_runners and monotonic() < deadline:
+        app.processEvents()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+def test_main_window_blocks_subtitle_edit_for_running_project(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """正在跑流程的那个项目本身仍要禁止改字幕，避免并发写同一份文件。"""
+
+    # arrange：只准备一个项目，并让它进入后台识别状态。
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    workspace.ensure_structure()
+    container = AppContainer(
+        settings=Settings(workspace_root=workspace.root),
+        workspace=workspace,
+        logger=logging.getLogger("test-same-project-subtitle-edit"),
+        asr_hardware_info=cpu_hardware_info(),
+    )
+    project = Project(
+        project_id="project-self-busy",
+        source_video=tmp_path / "lesson.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=workspace.projects_dir / "project-self-busy",
+    )
+    project.mark_completed()
+    container.project_repository.save(project)
+    task = Task("task-self-busy", project.project_id, "translate_subtitles")
+    task.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    container.task_repository.save(task)
+    container.subtitle_repository.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    container.subtitle_repository.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    window = container.create_main_window()
+    release_operation = Event()
+    operation_started = Event()
+
+    def busy_operation() -> object:
+        """模拟同一个项目的识别流程，直到测试主动放行才结束。"""
+
+        operation_started.set()
+        release_operation.wait(timeout=3)
+        return object()
+
+    assert window._start_project_operation(
+        busy_operation,
+        lambda _result: None,
+        "该项目正在识别……",
+        project_id=project.project_id,
+    )
+    deadline = monotonic() + 3
+    while not operation_started.is_set() and monotonic() < deadline:
+        app.processEvents()
+
+    # act：用户仍可看到字幕，但保存动作应给出明确提示而不是静默失败。
+    window.navigation.set_current_page(0)
+    window.tasks_page.task_list.setCurrentRow(0)
+    app.processEvents()
+    window.tasks_page.subtitle_translation_editor.setPlainText("你好，课堂")
+    window.tasks_page.save_translation_button.click()
+    app.processEvents()
+
+    # assert：没有启动修订线程，字幕保持原值，界面给出针对性提示。
+    assert window._subtitle_revision_runner is None
+    saved = container.subtitle_repository.get_translated_segments(
+        project.project_id,
+        project.target_language,
+    )
+    assert [segment.text for segment in saved] == ["你好"]
+    assert "正在识别或翻译" in window.tasks_page.subtitle_feedback_label.text()
+
+    release_operation.set()
+    deadline = monotonic() + 3
+    while window._pipeline_runners and monotonic() < deadline:
+        app.processEvents()
+
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+
+def test_main_window_saves_recognition_parallelism_from_settings(tmp_path) -> None:
+    """设置页调整并发数后，应立即更新调度器和任务页说明。"""
+
+    app = QApplication.instance() or QApplication([])
+    workspace = WorkspaceManager(tmp_path / "workspace")
+    workspace.ensure_structure()
+    container = AppContainer(
+        settings=Settings(
+            workspace_root=workspace.root,
+            task=TaskSettings(max_concurrency=2, max_heavy_concurrency=1),
+        ),
+        workspace=workspace,
+        logger=logging.getLogger("test-window-parallelism"),
+        asr_hardware_info=cpu_hardware_info(),
+    )
+    window = container.create_main_window()
+
+    # act：模拟用户在设置页把“同时处理视频数”从 1 调到 3。
+    window.settings_page.recognition_parallelism_spin.setValue(3)
+    app.processEvents()
+
+    # assert：调度器槽位、容器设置和任务页说明都同步到新值。
+    assert container.resource_scheduler.limit_of("transcribe_video") == 3
+    assert container.resource_scheduler.limit_of("export_video") == 3
+    assert container.settings.task.max_heavy_concurrency == 3
+    assert "同时 3 个" in window.tasks_page.resource_policy_label.text()
 
     window.close()
     window.deleteLater()

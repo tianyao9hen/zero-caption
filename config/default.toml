@@ -6,7 +6,7 @@ language = "zh-CN"
 theme = "system"
 
 [ui]
-default_page = "projects"
+default_page = "tasks"
 
 [engine.asr]
 provider = "faster-whisper"

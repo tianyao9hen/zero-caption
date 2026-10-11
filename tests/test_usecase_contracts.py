@@ -454,11 +454,12 @@ def test_translate_subtitles_keeps_completed_sentence_after_later_failure(tmp_pa
         target_language="zh-CN",
     )
 
-    with pytest.raises(RuntimeError, match="第二条翻译失败"):
-        usecase.execute(request)
+    result = usecase.execute(request)
 
     saved = subtitles.get_translated_segments(project.project_id, "zh-CN")
     assert [segment.segment_id for segment in saved] == ["seg-1"]
+    assert [failure.segment_id for failure in result.failed_segments] == ["seg-2"]
+    assert result.task.status is TaskStatus.SUCCEEDED
 
     retry_translator = RecordingTranslator()
     usecase.translator = retry_translator

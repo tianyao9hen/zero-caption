@@ -18,7 +18,7 @@ from core.domain.enums import (
     TaskCheckpoint,
     TaskStatus,
 )
-from core.dto.subtitle_dto import SubtitleSegmentDTO
+from core.dto.subtitle_dto import SubtitleSegmentDTO, TranslationFailureDTO
 from core.dto.task_dto import ExportRecordDTO
 from infrastructure.storage.sqlite_db import SQLiteDatabase
 
@@ -50,9 +50,10 @@ class SQLiteProjectRepository:
                 INSERT INTO projects (
                     project_id, source_video, source_language, target_language,
                     workspace_dir, source_fingerprint, translation_context,
-                    processing_mode, export_mode, output_path, status, created_at,
-                    updated_at, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    processing_mode, export_mode, output_path,
+                    prepared_output_path, prepared_translation_signature,
+                    status, created_at, updated_at, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     source_video=excluded.source_video,
                     source_language=excluded.source_language,
@@ -63,6 +64,10 @@ class SQLiteProjectRepository:
                     processing_mode=excluded.processing_mode,
                     export_mode=excluded.export_mode,
                     output_path=excluded.output_path,
+                    prepared_output_path=excluded.prepared_output_path,
+                    prepared_translation_signature=(
+                        excluded.prepared_translation_signature
+                    ),
                     status=excluded.status,
                     updated_at=excluded.updated_at,
                     last_error=excluded.last_error
@@ -78,6 +83,12 @@ class SQLiteProjectRepository:
                     project.processing_mode.value,
                     project.export_mode.value,
                     str(project.output_path) if project.output_path else None,
+                    (
+                        str(project.prepared_output_path)
+                        if project.prepared_output_path
+                        else None
+                    ),
+                    project.prepared_translation_signature,
                     project.status.value,
                     _encode_time(project.created_at),
                     _encode_time(project.updated_at),
@@ -97,11 +108,15 @@ class SQLiteProjectRepository:
         return self._from_row(row) if row else None
 
     def list_all(self) -> list[Project]:
-        """按更新时间倒序返回历史项目。"""
+        """按创建时间正序返回历史项目。
+
+        任务页和执行队列都要求“先创建的先处理”，因此这里不再按更新时间
+        倒序。重试或下载会改变 `updated_at`，但不应让任务在列表中跳位。
+        """
 
         with self.database.connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM projects ORDER BY updated_at DESC"
+                "SELECT * FROM projects ORDER BY created_at ASC"
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
@@ -120,6 +135,10 @@ class SQLiteProjectRepository:
             )
             connection.execute(
                 "DELETE FROM subtitle_segments WHERE project_id = ?",
+                (project_id,),
+            )
+            connection.execute(
+                "DELETE FROM translation_failures WHERE project_id = ?",
                 (project_id,),
             )
             connection.execute(
@@ -147,6 +166,16 @@ class SQLiteProjectRepository:
             processing_mode=ProcessingMode(row["processing_mode"]),
             export_mode=ExportMode(row["export_mode"]),
             output_path=Path(row["output_path"]) if row["output_path"] else None,
+            prepared_output_path=(
+                Path(row["prepared_output_path"])
+                if row["prepared_output_path"]
+                else None
+            ),
+            prepared_translation_signature=(
+                row["prepared_translation_signature"]
+                if row["prepared_translation_signature"] is not None
+                else ""
+            ),
             status=ProjectStatus(row["status"]),
             created_at=_decode_time(row["created_at"]),
             updated_at=_decode_time(row["updated_at"]),
@@ -296,6 +325,37 @@ class SQLiteSubtitleRepository:
         """读取项目指定语言的译文字幕片段。"""
 
         return self._get_segments(project_id, "translated", target_language)
+
+    def save_translation_failure(self, failure: TranslationFailureDTO) -> TranslationFailureDTO:
+        from datetime import UTC, datetime
+        now = datetime.now(UTC).isoformat()
+        with self.database.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO translation_failures (
+                    project_id, segment_id, target_language, error_message, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, segment_id, target_language) DO UPDATE SET
+                    error_message=excluded.error_message, updated_at=excluded.updated_at
+                """,
+                (failure.project_id, failure.segment_id, failure.target_language, failure.error_message, now, now),
+            )
+        return failure
+
+    def get_translation_failures(self, project_id: str, target_language: str) -> list[TranslationFailureDTO]:
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT project_id, segment_id, target_language, error_message FROM translation_failures WHERE project_id = ? AND target_language = ?",
+                (project_id, target_language),
+            ).fetchall()
+        return [TranslationFailureDTO(row["project_id"], row["segment_id"], row["target_language"], row["error_message"]) for row in rows]
+
+    def clear_translation_failure(self, project_id: str, segment_id: str, target_language: str) -> None:
+        with self.database.connection() as connection:
+            connection.execute(
+                "DELETE FROM translation_failures WHERE project_id = ? AND segment_id = ? AND target_language = ?",
+                (project_id, segment_id, target_language),
+            )
 
     def _save_segments(self, project_id: str, version: str, target_language: str, segments: list[SubtitleSegmentDTO]) -> list[SubtitleSegmentDTO]:
         """在事务中删除旧版本并写入新片段。"""

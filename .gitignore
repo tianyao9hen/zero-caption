@@ -8,6 +8,7 @@ build/
 *.egg-info/
 logs/app.log
 .vscode
+.workbuddy/
 .tmp
 .tools/
 docs/

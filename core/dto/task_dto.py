@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -57,6 +58,10 @@ class VideoTaskHistoryDTO:
     retry_count: int
     created_at: datetime
     updated_at: datetime
+    # 项目目录内已经烧录好的成品视频。为空表示这份成品还不能直接交付，
+    # 用户下载时需要现场重新编码。字段放在最后并给出默认值，是为了兼容
+    # 已经存在的旧调用方：它们不必为每个新短业务流程同步修改构造参数。
+    prepared_output_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -65,6 +70,10 @@ class ExportVideoInput:
 
     `output_path` 表示用户期望的主要成品路径。外挂模式最终会规整为
     `.srt` 字幕文件，烧录模式则保持为视频文件。
+
+    `progress_callback` 是可选的进度上报入口。烧录需要重新编码整段视频，
+    耗时可能达到数十分钟；适配器通过它回报已处理毫秒数和总毫秒数，
+    用例才能把真实进度写进任务记录，而不是让界面停在 100% 空转。
     """
 
     project_id: str
@@ -72,6 +81,16 @@ class ExportVideoInput:
     subtitle_path: Path
     output_path: Path
     mode: ExportMode
+    # 已经烧录好的现成成品。非空时导出器直接把它复制到 `output_path`，
+    # 不需要再读源视频重新编码，用户点击下载因此几乎不用等待。
+    prepared_source_path: Path | None = None
+    # 界面阶段文案标识。`export_video` 表示用户主动下载，
+    # `prepare_product` 表示任务创建流程在项目目录内预生成同一份成品。
+    task_type: str = "export_video"
+    progress_callback: Callable[[int, int], None] | None = field(
+        default=None,
+        repr=False,
+    )
 
 
 @dataclass(slots=True)
@@ -80,11 +99,16 @@ class ReexportProjectInput:
 
     `output_path` 留空时继续使用项目上次保存的路径；如果项目从未导出，
     核心用例会回退到项目自己的 `exports/` 目录。
+
+    `prepare_project_product` 为 `True` 时不是一次面向用户的下载，而是任务
+    创建流程内部的“先把成品做好”动作：结果写入项目自己的 `exports/` 目录，
+    并记录到 `Project.prepared_output_path`，不会覆盖用户上次选择的下载目录。
     """
 
     project_id: str
     mode: ExportMode
     output_path: Path | None = None
+    prepare_project_product: bool = False
 
 
 @dataclass(slots=True)

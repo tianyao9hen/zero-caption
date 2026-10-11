@@ -18,6 +18,7 @@ from config.settings import (
     Settings,
     TranslationSettings,
     save_engine_settings,
+    save_task_settings,
     save_workspace_settings,
 )
 from core.dto.asr_dto import AsrHardwareInfoDTO
@@ -59,6 +60,7 @@ from infrastructure.subtitle.srt_writer import SrtWriter
 from infrastructure.export import (
     BurnInExporter,
     CompositeVideoExporter,
+    PreparedVideoExporter,
     SoftSubtitleExporter,
 )
 from core.domain.enums import ExportMode
@@ -277,7 +279,10 @@ class AppContainer:
                     ExportMode.BURN_IN: BurnInExporter(
                         self.settings.runtime.ffmpeg_path
                     ),
-                }
+                },
+                # 项目目录里已经有现成成品时走这条复制通道，用户点击下载
+                # 就不必再经历一次完整的重新编码。
+                prepared_exporter=PreparedVideoExporter(),
             ),
             event_publisher=self.progress_bus,
         )
@@ -300,6 +305,47 @@ class AppContainer:
             project_workspace=self.workspace,
             resource_scheduler=self.resource_scheduler,
         )
+
+    def update_task_concurrency(self, max_heavy_concurrency: int) -> Settings:
+        """持久化识别并发数，并立即调整共享调度器的实际槽位。
+
+        参数：
+            max_heavy_concurrency：本地识别和视频导出允许同时进行的数量。
+
+        返回：
+            已经包含新并发设置的完整应用设置。
+
+        副作用：
+            写入用户配置文件，并更新共享调度器。已经在执行的高资源步骤
+            不受影响，新上限只对后续排队任务生效。
+        """
+
+        if max_heavy_concurrency <= 0:
+            raise ValueError("高资源任务并发数必须大于 0。")
+
+        save_task_settings(max_heavy_concurrency)
+        scheduler = self._require_resource_scheduler()
+        scheduler.set_limit("transcribe_video", max_heavy_concurrency)
+        scheduler.set_limit("export_video", max_heavy_concurrency)
+        self.settings = replace(
+            self.settings,
+            task=replace(
+                self.settings.task,
+                max_concurrency=max(
+                    self.settings.task.max_concurrency,
+                    max_heavy_concurrency,
+                ),
+                max_heavy_concurrency=max_heavy_concurrency,
+            ),
+        )
+        return self.settings
+
+    def _require_resource_scheduler(self) -> SerialResourceScheduler:
+        """返回共享调度器，装配异常时给出明确错误。"""
+
+        if self.resource_scheduler is None:
+            raise RuntimeError("高资源任务调度器尚未装配。")
+        return self.resource_scheduler
 
     def _create_translation_adapter(
         self,
@@ -477,6 +523,7 @@ class AppContainer:
             task_service=task_service,
             task_service_factory=self.create_task_service,
             settings_updater=self.update_engine_settings,
+            task_concurrency_updater=self.update_task_concurrency,
             workspace_updater=self.update_workspace,
             workspace_deleter=self.delete_workspace,
             translation_model_tester=self.test_translation_model,

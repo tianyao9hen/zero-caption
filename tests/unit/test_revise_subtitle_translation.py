@@ -175,6 +175,34 @@ def test_manual_edit_updates_only_selected_translation_and_srt(tmp_path) -> None
     assert project.status is ProjectStatus.COMPLETED
 
 
+def test_manual_edit_can_fill_missing_translation(tmp_path) -> None:
+    """失败句没有自动译文时，用户仍可直接填写并保存。"""
+
+    translator = RecordingTranslator()
+    usecase, project, subtitles, _tasks, _publisher = _build_usecase(
+        tmp_path, translator
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+
+    result = usecase.save_edit(
+        EditSubtitleTranslationInput(
+            project_id=project.project_id,
+            segment_id="segment-2",
+            translated_text="世界",
+        )
+    )
+
+    saved = subtitles.get_translated_segments(
+        project.project_id, project.target_language
+    )
+    assert [segment.text for segment in saved] == ["你好", "世界"]
+    assert result.item.translated_text == "世界"
+
+
 def test_retranslate_calls_model_once_for_selected_source_and_keeps_other_line(
     tmp_path,
 ) -> None:

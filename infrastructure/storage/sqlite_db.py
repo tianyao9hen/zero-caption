@@ -55,6 +55,8 @@ class SQLiteDatabase:
                     processing_mode TEXT NOT NULL DEFAULT 'full_pipeline',
                     export_mode TEXT NOT NULL DEFAULT 'soft_subtitle',
                     output_path TEXT,
+                    prepared_output_path TEXT,
+                    prepared_translation_signature TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -89,6 +91,16 @@ class SQLiteDatabase:
                     text TEXT NOT NULL,
                     language TEXT NOT NULL,
                     PRIMARY KEY(project_id, version, target_language, segment_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id)
+                );
+                CREATE TABLE IF NOT EXISTS translation_failures (
+                    project_id TEXT NOT NULL,
+                    segment_id TEXT NOT NULL,
+                    target_language TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(project_id, segment_id, target_language),
                     FOREIGN KEY(project_id) REFERENCES projects(project_id)
                 );
                 CREATE TABLE IF NOT EXISTS export_records (
@@ -130,6 +142,13 @@ class SQLiteDatabase:
                     ),
                     "export_mode": "TEXT NOT NULL DEFAULT 'soft_subtitle'",
                     "output_path": "TEXT",
+                    # 烧录任务会在项目目录内预生成成品视频。这两个字段记录那
+                    # 份内部成品及其对应译文指纹，旧数据库升级后才能识别
+                    # “已经可以直接复制交付”的状态。
+                    "prepared_output_path": "TEXT",
+                    "prepared_translation_signature": (
+                        "TEXT NOT NULL DEFAULT ''"
+                    ),
                 },
             )
 

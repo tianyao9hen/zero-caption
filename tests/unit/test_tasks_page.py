@@ -5,7 +5,11 @@ from PySide6.QtWidgets import QApplication, QGridLayout, QMessageBox, QSplitter
 
 from core.domain.entities import Project, Task
 from core.domain.enums import ExportMode, TaskCheckpoint
-from core.dto.subtitle_dto import SubtitleSegmentDTO, TranslationProgressDTO
+from core.dto.subtitle_dto import (
+    SubtitleSegmentDTO,
+    TranslationFailureDTO,
+    TranslationProgressDTO,
+)
 from core.dto.task_dto import TaskSummaryDTO
 from core.services.task_service import TaskService
 from infrastructure.storage.memory_repositories import (
@@ -172,7 +176,6 @@ def test_tasks_page_never_blocks_new_submission_by_active_task_count() -> None:
     page.set_project_operation_capacity(active_count=1, max_concurrency=2)
     assert page.create_task_button.isEnabled() is True
     assert page.concurrency_label.text() == "后台 1（创建不限量）"
-    assert "自动排队串行执行" in page.resource_policy_label.text()
 
     page.set_project_operation_capacity(active_count=2, max_concurrency=2)
 
@@ -180,6 +183,135 @@ def test_tasks_page_never_blocks_new_submission_by_active_task_count() -> None:
     assert page.create_task_button.isEnabled() is True
     assert page.refresh_button.isEnabled() is True
     assert page.concurrency_label.text() == "后台 2（创建不限量）"
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_explains_recognition_parallelism() -> None:
+    """任务页应展示识别并发上限，并说明下载成品独立排队。"""
+
+    app = QApplication.instance() or QApplication([])
+    page = TasksPage(TaskService())
+
+    page.set_project_operation_capacity(
+        active_count=0,
+        max_concurrency=2,
+        recognition_parallelism=3,
+    )
+
+    policy_text = page.resource_policy_label.text()
+    assert "同时 3 个" in policy_text
+    assert "下载成品独立排队" in policy_text
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_keeps_download_enabled_while_other_video_is_processing(
+    tmp_path,
+) -> None:
+    """其他视频正在识别时，当前项目的下载按钮不应被锁死。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    project = Project(
+        project_id="project-ready",
+        source_video=tmp_path / "ready.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-ready",
+    )
+    project.mark_completed()
+    projects.save(project)
+    completed = Task("task-ready", project.project_id, "translate_subtitles")
+    completed.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    tasks.save(completed)
+    subtitles.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    page = TasksPage(
+        TaskService(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+        )
+    )
+
+    page.refresh_history()
+    assert page.download_button.isEnabled() is True
+
+    # 另一个视频正在识别，只影响它自己，不应影响当前项目的下载入口。
+    page.set_project_operation_capacity(
+        active_count=1,
+        max_concurrency=2,
+        active_project_ids={"project-other"},
+    )
+
+    assert page.download_button.isEnabled() is True
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_disables_download_only_while_same_video_exports(
+    tmp_path,
+) -> None:
+    """同一个视频正在导出成品时才临时禁用下载，结束后立即恢复。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    project = Project(
+        project_id="project-exporting",
+        source_video=tmp_path / "exporting.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-exporting",
+    )
+    project.mark_completed()
+    projects.save(project)
+    completed = Task("task-exporting", project.project_id, "translate_subtitles")
+    completed.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    tasks.save(completed)
+    subtitles.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    page = TasksPage(
+        TaskService(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+        )
+    )
+
+    page.refresh_history()
+    page.set_project_operation_capacity(
+        active_count=1,
+        max_concurrency=2,
+        exporting_project_ids={project.project_id},
+    )
+    assert page.download_button.isEnabled() is False
+
+    # 导出线程退出后应恢复可点，允许再次下载同一个项目。
+    page.set_project_operation_capacity(
+        active_count=0,
+        max_concurrency=2,
+        exporting_project_ids=set(),
+    )
+    assert page.download_button.isEnabled() is True
     page.deleteLater()
     app.processEvents()
 
@@ -304,12 +436,8 @@ def test_tasks_page_allows_deleting_running_project(
     page = TasksPage(
         TaskService(project_repository=projects, task_repository=tasks)
     )
-    emitted: list[tuple[str, str]] = []
-    page.delete_requested.connect(
-        lambda project_id, workspace_dir: emitted.append(
-            (project_id, workspace_dir)
-        )
-    )
+    emitted: list[list[tuple[str, str]]] = []
+    page.delete_requested.connect(emitted.append)
     monkeypatch.setattr(
         QMessageBox,
         "question",
@@ -321,7 +449,61 @@ def test_tasks_page_allows_deleting_running_project(
     page.delete_button.click()
     app.processEvents()
 
-    assert emitted == [(project.project_id, str(project.workspace_dir))]
+    assert emitted == [[(project.project_id, str(project.workspace_dir))]]
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_deletes_multiple_selected_tasks_in_one_action(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """按住 Ctrl 多选后，删除按钮应一次性提交全部选中任务。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    for index in (1, 2, 3):
+        project = Project(
+            project_id=f"project-batch-{index}",
+            source_video=tmp_path / f"batch-{index}.mp4",
+            source_language="en",
+            target_language="zh-CN",
+            workspace_dir=tmp_path / f"project-batch-{index}",
+        )
+        project.mark_processing()
+        projects.save(project)
+        running = Task(f"task-batch-{index}", project.project_id, "translate_subtitles")
+        running.start("正在翻译")
+        tasks.save(running)
+
+    page = TasksPage(
+        TaskService(project_repository=projects, task_repository=tasks)
+    )
+    emitted: list[list[tuple[str, str]]] = []
+    page.delete_requested.connect(emitted.append)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    page.refresh_history()
+    # 复选第一项和第三项，中间一项保持不选。
+    page.task_list.setCurrentRow(0)
+    page.task_list.selectionModel().select(
+        page.task_list.model().index(2, 0),
+        page.task_list.selectionModel().SelectionFlag.Select,
+    )
+    page.delete_button.click()
+    app.processEvents()
+
+    assert emitted == [
+        [
+            ("project-batch-1", str(tmp_path / "project-batch-1")),
+            ("project-batch-3", str(tmp_path / "project-batch-3")),
+        ]
+    ]
     page.deleteLater()
     app.processEvents()
 
@@ -435,6 +617,192 @@ def test_tasks_page_emits_retry_for_failed_project(tmp_path) -> None:
 
     assert page.retry_button.isEnabled() is True
     assert emitted == [(project.project_id, "full_pipeline")]
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_lists_failed_subtitles_and_jumps_to_them(tmp_path) -> None:
+    """翻译失败清单应展示失败原因，点击后跳到主列表中的同一条字幕。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    project = Project(
+        project_id="project-failure",
+        source_video=tmp_path / "failure.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-failure",
+    )
+    project.mark_completed()
+    projects.save(project)
+    completed = Task("task-failure", project.project_id, "translate_subtitles")
+    completed.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    tasks.save(completed)
+    subtitles.save_source_segments(
+        project.project_id,
+        [
+            SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en"),
+            SubtitleSegmentDTO("segment-2", 1_000, 2_000, "world", "en"),
+        ],
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    subtitles.save_translation_failure(
+        TranslationFailureDTO(
+            project_id=project.project_id,
+            segment_id="segment-2",
+            target_language=project.target_language,
+            error_message="HTTP 503",
+        )
+    )
+    page = TasksPage(
+        TaskService(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+        )
+    )
+
+    page.refresh_history()
+    app.processEvents()
+
+    assert page.failed_subtitle_list.count() == 1
+    assert "HTTP 503" in page.failed_subtitle_list.item(0).text()
+    assert "共 1 条字幕翻译失败" in page.failure_count_label.text()
+    # 存在失败字幕时不应允许直接导出，下载按钮保持关闭。
+    assert page.download_button.isEnabled() is False
+
+    # `itemClicked` 只在真实点击时发出，测试里用 Qt 自带的点击模拟触发。
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(
+        page.failed_subtitle_list.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        page.failed_subtitle_list.visualItemRect(
+            page.failed_subtitle_list.item(0)
+        ).center(),
+    )
+    app.processEvents()
+
+    assert page.subtitle_list.currentRow() == 1
+    assert page.subtitle_source_text.toPlainText() == "world"
+    assert "已定位到第 2 条失败字幕" in page.subtitle_feedback_label.text()
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_hides_failure_group_when_translation_is_complete(
+    tmp_path,
+) -> None:
+    """全部翻译成功时不占用界面空间展示失败清单。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    project = Project(
+        project_id="project-no-failure",
+        source_video=tmp_path / "clean.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-no-failure",
+    )
+    project.mark_completed()
+    projects.save(project)
+    completed = Task("task-no-failure", project.project_id, "translate_subtitles")
+    completed.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    tasks.save(completed)
+    subtitles.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    page = TasksPage(
+        TaskService(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+        )
+    )
+
+    page.refresh_history()
+    app.processEvents()
+
+    assert page.failed_subtitle_list.count() == 0
+    assert page.failure_group.isVisible() is False
+    assert page.download_button.isEnabled() is True
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_marks_ready_burn_in_product_on_download_button(
+    tmp_path,
+) -> None:
+    """任务目录里已经有成品时，下载按钮应提示可以直接保存。"""
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    subtitles = InMemorySubtitleRepository()
+    prepared_path = tmp_path / "project-ready" / "exports" / "video-烧录成品.mp4"
+    prepared_path.parent.mkdir(parents=True)
+    prepared_path.write_bytes(b"burned video")
+    project = Project(
+        project_id="project-ready",
+        source_video=tmp_path / "video.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-ready",
+        export_mode=ExportMode.BURN_IN,
+        prepared_output_path=prepared_path,
+    )
+    project.mark_completed()
+    projects.save(project)
+    tasks.save(Task("task-ready", project.project_id, "translate_subtitles"))
+    subtitles.save_source_segments(
+        project.project_id,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "hello", "en")],
+    )
+    subtitles.save_translated_segments(
+        project.project_id,
+        project.target_language,
+        [SubtitleSegmentDTO("segment-1", 0, 1_000, "你好", "zh-CN")],
+    )
+    page = TasksPage(
+        TaskService(
+            project_repository=projects,
+            task_repository=tasks,
+            subtitle_repository=subtitles,
+        )
+    )
+
+    page.refresh_history()
+    app.processEvents()
+
+    assert page.download_button.isEnabled() is True
+    assert "已在任务目录生成" in page.download_button.toolTip()
+
+    # 成品被删除后，界面必须回到“需要重新生成”的说法。
+    prepared_path.unlink()
+    page.set_project_operation_capacity(
+        active_count=0,
+        max_concurrency=1,
+        active_project_ids=set(),
+        exporting_project_ids=set(),
+    )
+    app.processEvents()
+    assert "已在任务目录生成" not in page.download_button.toolTip()
     page.deleteLater()
     app.processEvents()
 

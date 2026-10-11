@@ -11,9 +11,13 @@ from __future__ import annotations
 class TranslationError(RuntimeError):
     """远程翻译请求或响应不符合预期时抛出的基础异常。"""
 
+    skip_segment = True
+
 
 class TranslationConfigurationError(TranslationError):
     """翻译地址、模型或密钥配置缺失时抛出的异常。"""
+
+    skip_segment = False
 
 
 class TranslationResponseError(TranslationError):

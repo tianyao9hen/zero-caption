@@ -17,6 +17,7 @@ from core.dto.subtitle_dto import (
     TranslateSubtitlesInput,
     TranslateSubtitlesResult,
     TranslationProgressDTO,
+    TranslationFailureDTO,
 )
 from core.ports.events import TaskEventPublisher, TranslationProgressPublisher
 from core.ports.repository import ProjectRepository, SubtitleRepository, TaskRepository
@@ -89,17 +90,73 @@ class TranslateSubtitles:
             # 第二步：按原始顺序逐条处理。即使翻译端口保留列表参数，
             # 核心用例每次也只传入一个片段，从业务层保证一次字幕对应一次请求。
             translated_segments: list[SubtitleSegmentDTO] = []
+            failed_segments: list[TranslationFailureDTO] = []
             total_segments = len(source_segments)
             for current_index, source_segment in enumerate(source_segments, start=1):
                 translated_segment = cached_by_id.get(source_segment.segment_id)
                 restored_from_cache = translated_segment is not None
+                translation_error = ""
                 if translated_segment is None:
-                    translated_segment = self._translate_one(
-                        source_segment=source_segment,
-                        source_language=request.source_language,
-                        target_language=request.target_language,
-                        context=request.context,
+                    try:
+                        translated_segment = self._translate_one(
+                            source_segment=source_segment,
+                            source_language=request.source_language,
+                            target_language=request.target_language,
+                            context=request.context,
+                        )
+                    except Exception as exc:
+                        # 配置缺失属于整项任务无法执行，不能伪装成单句失败；
+                        # 响应解析、网络耗尽重试等异常才允许记录后继续。
+                        if not getattr(exc, "skip_segment", True):
+                            raise
+                        translation_error = str(exc) or exc.__class__.__name__
+                        failure = TranslationFailureDTO(
+                            project_id=project.project_id,
+                            segment_id=source_segment.segment_id,
+                            target_language=request.target_language,
+                            error_message=translation_error,
+                        )
+                        save_failure = getattr(
+                            self.subtitle_repository, "save_translation_failure", None
+                        )
+                        if callable(save_failure):
+                            save_failure(failure)
+                        failed_segments.append(failure)
+                        if self.translation_event_publisher is not None:
+                            self.translation_event_publisher.publish_translation(
+                                TranslationProgressDTO(
+                                    task_id=task.task_id,
+                                    current_index=current_index,
+                                    total_segments=total_segments,
+                                    source_text=source_segment.text,
+                                    translated_text="",
+                                    project_id=project.project_id,
+                                    segment_id=source_segment.segment_id,
+                                    start_ms=source_segment.start_ms,
+                                    end_ms=source_segment.end_ms,
+                                    translation_error=translation_error,
+                                )
+                            )
+                        task.update_progress(
+                            progress=40 + round(current_index / total_segments * 55),
+                            current_step=f"逐句翻译 {current_index}/{total_segments}",
+                            checkpoint=TaskCheckpoint.TRANSCRIBED,
+                            message=f"第 {current_index} 条翻译失败，已跳过：{translation_error}",
+                        )
+                        self.task_repository.save(task)
+                        if self.event_publisher is not None:
+                            self.event_publisher.publish(task)
+                        continue
+
+                    clear_failure = getattr(
+                        self.subtitle_repository, "clear_translation_failure", None
                     )
+                    if callable(clear_failure):
+                        clear_failure(
+                            project.project_id,
+                            source_segment.segment_id,
+                            request.target_language,
+                        )
 
                 translated_segments.append(translated_segment)
 
@@ -137,6 +194,7 @@ class TranslateSubtitles:
                             segment_id=source_segment.segment_id,
                             start_ms=source_segment.start_ms,
                             end_ms=source_segment.end_ms,
+                            translation_error=translation_error,
                         )
                     )
 
@@ -153,7 +211,11 @@ class TranslateSubtitles:
                 )
 
             task.mark_succeeded(
-                "已复用译文字幕" if reused_translation else "翻译完成",
+                (
+                    f"翻译完成，{len(failed_segments)} 条字幕失败待处理"
+                    if failed_segments
+                    else ("已复用译文字幕" if reused_translation else "翻译完成")
+                ),
                 checkpoint=TaskCheckpoint.TRANSLATED,
             )
             self.task_repository.save(task)
@@ -166,6 +228,7 @@ class TranslateSubtitles:
                 translated_segments=translated_segments,
                 subtitle_path=subtitle_path,
                 reused_translation=reused_translation,
+                failed_segments=failed_segments,
             )
         except Exception as exc:
             error_message = str(exc) or exc.__class__.__name__

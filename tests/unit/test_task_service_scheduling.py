@@ -7,11 +7,19 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from core.domain.entities import Task
+from core.domain.entities import Project, Task
 from core.domain.enums import ExportMode
 from core.dto.subtitle_dto import TranscribeVideoInput, TranslateSubtitlesInput
 from core.dto.task_dto import ExportVideoInput, ReexportProjectInput
 from core.services.task_service import TaskService
+from infrastructure.storage.memory_repositories import (
+    InMemoryProjectRepository,
+    InMemoryTaskRepository,
+)
+from infrastructure.storage.memory_repositories import (
+    InMemoryProjectRepository,
+    InMemoryTaskRepository,
+)
 
 
 class RecordingResourceScheduler:
@@ -90,3 +98,62 @@ def test_task_service_limits_transcription_and_export_but_not_translation(
         "export_video",
         "export_video",
     ]
+
+
+def test_list_video_tasks_keeps_creation_order(tmp_path) -> None:
+    """任务列表应按创建顺序正序排列，重试和下载不应让任务跳位。"""
+
+    # arrange：三个项目依次创建，之后再更新最旧项目的状态。
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    created_ids: list[str] = []
+    for index in (1, 2, 3):
+        project = Project(
+            project_id=f"project-{index}",
+            source_video=tmp_path / f"video-{index}.mp4",
+            source_language="en",
+            target_language="zh-CN",
+            workspace_dir=tmp_path / f"project-{index}",
+        )
+        project.mark_completed()
+        projects.save(project)
+        created_ids.append(project.project_id)
+        task = Task(f"task-{index}", project.project_id, "translate_subtitles")
+        task.mark_succeeded("翻译完成")
+        tasks.save(task)
+
+    # 模拟最旧的项目刚刚被重新处理：更新时间变化但创建顺序不变。
+    oldest = projects.get_by_id(created_ids[0])
+    oldest.mark_failed("模拟重试失败")
+    projects.save(oldest)
+
+    service = TaskService(project_repository=projects, task_repository=tasks)
+    history = service.list_video_tasks()
+
+    assert [item.project_id for item in history] == created_ids
+
+
+def test_list_video_tasks_keeps_most_recent_when_limit_is_applied(tmp_path) -> None:
+    """限制展示数量时，应保留最新创建的任务而不是最早创建的。"""
+
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    for index in range(1, 5):
+        project = Project(
+            project_id=f"project-{index}",
+            source_video=tmp_path / f"video-{index}.mp4",
+            source_language="en",
+            target_language="zh-CN",
+            workspace_dir=tmp_path / f"project-{index}",
+        )
+        project.mark_completed()
+        projects.save(project)
+        task = Task(f"task-{index}", project.project_id, "translate_subtitles")
+        task.mark_succeeded("翻译完成")
+        tasks.save(task)
+
+    service = TaskService(project_repository=projects, task_repository=tasks)
+    history = service.list_video_tasks(limit=2)
+
+    assert [item.project_id for item in history] == ["project-3", "project-4"]
+

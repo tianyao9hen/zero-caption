@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from core.domain.entities import Project, Task
-from core.dto.subtitle_dto import SubtitleSegmentDTO
+from core.dto.subtitle_dto import SubtitleSegmentDTO, TranslationFailureDTO
 from core.dto.task_dto import ExportRecordDTO
 
 
@@ -57,6 +57,21 @@ class SubtitleRepository(Protocol):
         project_id: str,
         target_language: str,
     ) -> list[SubtitleSegmentDTO]: ...
+
+    def save_translation_failure(self, failure: TranslationFailureDTO) -> TranslationFailureDTO: ...
+
+    def get_translation_failures(
+        self,
+        project_id: str,
+        target_language: str,
+    ) -> list[TranslationFailureDTO]: ...
+
+    def clear_translation_failure(
+        self,
+        project_id: str,
+        segment_id: str,
+        target_language: str,
+    ) -> None: ...
 
 
 class ExportRecordRepository(Protocol):

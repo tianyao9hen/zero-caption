@@ -48,6 +48,12 @@ def test_sqlite_repositories_round_trip_domain_data(tmp_path) -> None:
         processing_mode=ProcessingMode.FULL_PIPELINE,
         export_mode=ExportMode.BURN_IN,
         output_path=tmp_path / "exports" / "lesson.mp4",
+        # 烧录任务会自动在任务目录生成成品，这两个字段必须能跨进程恢复，
+        # 否则重启后下载会退化成一次完整重新编码。
+        prepared_output_path=(
+            tmp_path / "projects" / "project-1" / "exports" / "lesson-烧录成品.mp4"
+        ),
+        prepared_translation_signature="signature-1",
     )
     project.mark_imported()
     task = Task(task_id="task-1", project_id=project.project_id, task_type="demo")
@@ -87,6 +93,12 @@ def test_sqlite_repositories_round_trip_domain_data(tmp_path) -> None:
     assert restored_project.processing_mode is ProcessingMode.FULL_PIPELINE
     assert restored_project.export_mode is ExportMode.BURN_IN
     assert restored_project.output_path == project.output_path
+    assert (
+        restored_project.prepared_output_path == project.prepared_output_path
+    )
+    assert (
+        restored_project.prepared_translation_signature == "signature-1"
+    )
     assert restored_task is not None
     assert restored_task.checkpoint is TaskCheckpoint.AUDIO_EXTRACTED
     assert restored_task.progress == 40
@@ -189,6 +201,9 @@ def test_sqlite_database_migrates_legacy_project_request_columns(tmp_path) -> No
     assert restored.processing_mode is ProcessingMode.FULL_PIPELINE
     assert restored.export_mode is ExportMode.SOFT_SUBTITLE
     assert restored.output_path is None
+    # 旧项目没有预生成成品，新字段应给出明确的空默认值。
+    assert restored.prepared_output_path is None
+    assert restored.prepared_translation_signature == ""
 
 
 def test_sqlite_task_repository_recovers_running_tasks(tmp_path) -> None:

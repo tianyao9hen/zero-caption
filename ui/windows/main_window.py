@@ -39,7 +39,6 @@ from core.dto.task_dto import ExportVideoResult, ReexportProjectInput
 from infrastructure.storage.workspace import WorkspaceManager
 from infrastructure.task.progress_bus import ProgressBus
 from ui.dialogs.import_dialog import ImportDialog
-from ui.pages.projects_page import ProjectsPage
 from ui.pages.settings_page import SettingsPage
 from ui.pages.tasks_page import TasksPage
 from ui.widgets.navigation import NavigationWidget
@@ -47,6 +46,11 @@ from ui.widgets.status_bar import StatusBarWidget
 from ui.viewmodels.pipeline_runner import PipelineRunner
 from ui.viewmodels.subtitle_revision_runner import SubtitleRevisionRunner
 from ui.viewmodels.translation_test_runner import TranslationTestRunner
+
+# 后台操作分为两类。两类使用不同的线程登记集合，避免“正在识别某个视频”
+# 被误判成“这个项目的成品正在生成”，从而错误地锁死下载按钮。
+OPERATION_PIPELINE = "pipeline"
+OPERATION_EXPORT = "export"
 
 
 class MainWindow(QMainWindow):
@@ -59,6 +63,7 @@ class MainWindow(QMainWindow):
         task_service: TaskService,
         task_service_factory: Callable[[], TaskService],
         settings_updater: Callable[[EngineSettings], Settings],
+        task_concurrency_updater: Callable[[int], Settings],
         workspace_updater: Callable[[Path], Settings],
         workspace_deleter: Callable[[Path], None],
         translation_model_tester: Callable[[TranslationSettings, str], str],
@@ -74,6 +79,7 @@ class MainWindow(QMainWindow):
         self.task_service = task_service
         self.task_service_factory = task_service_factory
         self.settings_updater = settings_updater
+        self.task_concurrency_updater = task_concurrency_updater
         self.workspace_updater = workspace_updater
         self.workspace_deleter = workspace_deleter
         self.translation_model_tester = translation_model_tester
@@ -85,10 +91,15 @@ class MainWindow(QMainWindow):
         self._pipeline_runners: dict[int, PipelineRunner] = {}
         self._pipeline_project_ids: dict[int, str | None] = {}
         self._pipeline_task_services: dict[int, TaskService] = {}
+        # 成品导出单独登记。它不占用识别流程的登记位，因此“某个视频正在
+        # 分块识别”不会让用户在其他已完成视频上无法下载成品。
+        self._export_runners: dict[int, PipelineRunner] = {}
+        self._export_project_ids: dict[int, str | None] = {}
         # 运行中的项目可能暂时占用音频或视频文件。第一次删除会立即尝试，
         # 同时保留项目目录，在线程退出后再次执行幂等清理，避免残留文件夹。
         self._pending_task_deletions: dict[str, str] = {}
         self._max_pipeline_concurrency = settings.task.max_concurrency
+        self._recognition_parallelism = settings.task.max_heavy_concurrency
         self._translation_test_runner: TranslationTestRunner | None = None
         self._subtitle_revision_runner: SubtitleRevisionRunner | None = None
         # 同一张品牌图同时用于窗口图标和页眉，避免源码运行与安装版出现两套视觉标识。
@@ -103,11 +114,11 @@ class MainWindow(QMainWindow):
         # 这些控件都会随着主窗口长期存在，并由整个窗口共享。
         self.navigation = NavigationWidget()
         self.stack = QStackedWidget()
-        self.projects_page = ProjectsPage(workspace=workspace, task_service=task_service)
         self.tasks_page = TasksPage(task_service=task_service)
         self.tasks_page.set_project_operation_capacity(
             active_count=0,
             max_concurrency=self._max_pipeline_concurrency,
+            recognition_parallelism=self._recognition_parallelism,
         )
         self.settings_page = SettingsPage(
             settings=settings,
@@ -121,7 +132,7 @@ class MainWindow(QMainWindow):
 
         # `QStackedWidget` 一次只显示一个页面，但会把其他页面对象也保留在内存里。
         # 对这种小型桌面工具来说，这是一个足够简单直接的页面切换方案。
-        self.stack.addWidget(self.projects_page)
+        # 项目页已被移除，任务页成为默认工作区。
         self.stack.addWidget(self.tasks_page)
         self.stack.addWidget(self.settings_page)
 
@@ -130,6 +141,9 @@ class MainWindow(QMainWindow):
         self.navigation.page_changed.connect(self.stack.setCurrentIndex)
         self.settings_page.save_requested.connect(
             self._handle_engine_settings_save
+        )
+        self.settings_page.task_concurrency_change_requested.connect(
+            self._handle_task_concurrency_change
         )
         self.settings_page.workspace_change_requested.connect(
             self._handle_workspace_change
@@ -208,7 +222,7 @@ class MainWindow(QMainWindow):
         task_service = self.task_service_factory()
         # 创建完成后停留在任务工作区，让用户立即看到视频条目、当前阶段
         # 和逐句译文，而不是在任务运行期间反复切换页面寻找反馈。
-        self.navigation.set_current_page(1)
+        self.navigation.set_current_page(0)
         if not self._pipeline_runners:
             self.tasks_page.show_running()
         self._start_project_operation(
@@ -230,11 +244,8 @@ class MainWindow(QMainWindow):
             processing_mode is ProcessingMode.FULL_PIPELINE
             and not self.settings.engine.translation.is_configured()
         ):
-            self.tasks_page.set_project_operation_capacity(
-                active_count=len(self._pipeline_runners),
-                max_concurrency=self._max_pipeline_concurrency,
-                message="完整流程恢复前，请先在设置页保存可用的大模型配置。",
-                active_project_ids=self._active_pipeline_project_ids(),
+            self._sync_pipeline_capacity(
+                "完整流程恢复前，请先在设置页保存可用的大模型配置。"
             )
             return
         task_service = self.task_service_factory()
@@ -252,7 +263,12 @@ class MainWindow(QMainWindow):
         export_mode_value: str,
         output_path_value: str,
     ) -> None:
-        """在后台使用当前字幕生成用户主动下载的成品。"""
+        """在后台使用当前字幕生成用户主动下载的成品。
+
+        下载是独立的后台操作类别：它既不占用识别流程的登记位，也使用自己的
+        资源槽位。因此“某个视频还在分块识别”不会让本次下载一直排队等待，
+        也不会把下载按钮长期置灰。
+        """
 
         request = ReexportProjectInput(
             project_id=project_id,
@@ -263,46 +279,73 @@ class MainWindow(QMainWindow):
         self._start_project_operation(
             operation=lambda: task_service.reexport_project(request),
             success_handler=self._handle_download_success,
-            message="正在生成下载成品……",
+            # 烧录成品通常在创建任务时已经烧好，这一步多数时候只是复制文件；
+            # 尚未预生成或字幕改动过时才会在后台重新编码，文案因此统一表述。
+            message="正在准备下载成品……",
             project_id=project_id,
             task_service=task_service,
+            operation_kind=OPERATION_EXPORT,
         )
 
-    def _handle_delete_requested(
-        self,
-        project_id: str,
-        workspace_dir: str,
-    ) -> None:
-        """删除任意状态的任务，并为运行中项目登记退出后收尾。"""
+    def _handle_delete_requested(self, targets: object) -> None:
+        """批量删除任意状态的任务，并为运行中项目登记退出后收尾。"""
 
-        active = project_id in self._active_pipeline_project_ids()
-        revision_project_id = self._active_revision_project_id()
-        needs_final_cleanup = active or revision_project_id == project_id
-        if needs_final_cleanup:
-            self._pending_task_deletions[project_id] = workspace_dir
-
-        try:
-            self.task_service.delete_video_task(project_id, workspace_dir)
-        except (OSError, RuntimeError, ValueError) as exc:
-            if needs_final_cleanup:
-                # Windows 可能暂时锁住正在读写的音视频文件。保留待删除记录，
-                # 后台线程结束时会自动重试，不要求用户再次点击按钮。
-                message = f"任务正在退出，项目将在后台操作结束后删除：{exc}"
-                self.status_widget.show_message(message)
-                self.tasks_page.message_label.setText(message)
-                return
-            self.logger.exception("删除视频任务失败")
-            QMessageBox.warning(self, "删除失败", str(exc))
-            self.status_widget.show_message(f"删除任务失败：{exc}")
+        if not isinstance(targets, list) or not targets:
             return
 
+        active_project_ids = self._active_pipeline_project_ids()
+        active_project_ids |= self._active_export_project_ids()
+        revision_project_id = self._active_revision_project_id()
+
+        deleted_count = 0
+        deferred_count = 0
+        failed_messages: list[str] = []
+        for entry in targets:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            project_id, workspace_dir = entry
+            if not isinstance(project_id, str) or not isinstance(workspace_dir, str):
+                continue
+
+            needs_final_cleanup = (
+                project_id in active_project_ids
+                or revision_project_id == project_id
+            )
+            if needs_final_cleanup:
+                self._pending_task_deletions[project_id] = workspace_dir
+                deferred_count += 1
+
+            try:
+                self.task_service.delete_video_task(project_id, workspace_dir)
+            except (OSError, RuntimeError, ValueError) as exc:
+                if needs_final_cleanup:
+                    # Windows 可能暂时锁住正在读写的音视频文件。保留待删除记录，
+                    # 后台线程结束时会自动重试，不要求用户再次点击按钮。
+                    deferred_count += 1
+                    continue
+                self.logger.exception("删除视频任务失败")
+                failed_messages.append(f"{project_id}：{exc}")
+                continue
+
+            deleted_count += 1
+            if not needs_final_cleanup:
+                self._pending_task_deletions.pop(project_id, None)
+
         self.tasks_page.refresh_history()
-        if needs_final_cleanup:
-            message = "任务已从列表移除，后台操作退出后会再次检查项目目录。"
-        else:
-            self._pending_task_deletions.pop(project_id, None)
-            message = "任务记录和项目目录已删除。"
+
+        parts: list[str] = []
+        if deleted_count:
+            parts.append(f"已删除 {deleted_count} 个任务及其项目目录。")
+        if deferred_count:
+            parts.append(f"{deferred_count} 个任务将在后台操作结束后完成删除。")
+        if failed_messages:
+            parts.append("以下任务删除失败：" + "；".join(failed_messages))
+        if not parts:
+            return
+        message = "".join(parts)
         self.status_widget.show_message(message)
+        if failed_messages:
+            QMessageBox.warning(self, "删除失败", message)
 
     def _start_project_operation(
         self,
@@ -311,18 +354,30 @@ class MainWindow(QMainWindow):
         message: str,
         project_id: str | None = None,
         task_service: TaskService | None = None,
+        operation_kind: str = OPERATION_PIPELINE,
     ) -> bool:
-        """启动一个视频级后台操作，并返回是否成功占用普通并发槽位。"""
+        """启动一个视频级后台操作，并返回是否成功提交。
 
-        if project_id and project_id in self._active_pipeline_project_ids():
-            self.tasks_page.set_project_operation_capacity(
-                active_count=len(self._pipeline_runners),
-                max_concurrency=self._max_pipeline_concurrency,
-                message="这个视频已有后台操作正在执行，请勿重复提交。",
-                active_project_ids=self._active_pipeline_project_ids(),
+        `operation_kind` 决定这次操作登记到哪一组线程集合。识别与成品导出
+        分开登记，才能让“下载成品”不受长时间识别任务影响。
+        """
+
+        is_export = operation_kind == OPERATION_EXPORT
+        if is_export:
+            # 同一项目允许排队多个下载，但并发下载会同时写同一个目标文件。
+            # 因此只在“同一个项目已有导出在跑”时拒绝，其余项目互不影响。
+            if project_id and project_id in self._active_export_project_ids():
+                self._sync_pipeline_capacity(
+                    "这个视频已有一个成品正在生成，请等待完成后再下载。"
+                )
+                return False
+        elif project_id and project_id in self._active_pipeline_project_ids():
+            self._sync_pipeline_capacity(
+                "这个视频已有后台操作正在执行，请勿重复提交。"
             )
             return False
-        self.navigation.set_current_page(1)
+
+        self.navigation.set_current_page(0)
         runner = PipelineRunner(operation)
         runner.succeeded.connect(success_handler)
         runner.failed.connect(
@@ -336,10 +391,14 @@ class MainWindow(QMainWindow):
         # 自包含安装包运行较久后也能稳定移除活动项目并恢复下载按钮。
         runner.finished.connect(self._handle_pipeline_runner_finished)
         runner_id = id(runner)
-        self._pipeline_runners[runner_id] = runner
-        self._pipeline_project_ids[runner_id] = project_id
-        if task_service is not None:
-            self._pipeline_task_services[runner_id] = task_service
+        if is_export:
+            self._export_runners[runner_id] = runner
+            self._export_project_ids[runner_id] = project_id
+        else:
+            self._pipeline_runners[runner_id] = runner
+            self._pipeline_project_ids[runner_id] = project_id
+            if task_service is not None:
+                self._pipeline_task_services[runner_id] = task_service
         self._sync_pipeline_capacity(message)
         runner.start()
         return True
@@ -355,21 +414,38 @@ class MainWindow(QMainWindow):
             self.status_widget.update_summary(summary)
 
     def _handle_pipeline_success(self, result: ProcessVideoResult) -> None:
-        """处理后台线程成功信号，刷新项目页并展示本次主要产物。"""
+        """处理后台线程成功信号，刷新任务页并展示本次主要产物。"""
 
         project_id = result.project.project.project_id
         if project_id in self._pending_task_deletions:
             self.status_widget.show_message("后台任务已退出，正在完成项目删除。")
             return
 
-        self.projects_page.show_result(result)
         self.tasks_page.refresh_history()
-        self.navigation.set_current_page(1)
+        self.navigation.set_current_page(0)
         subtitle_path = result.subtitle_path
-        if result.translation is not None:
+        # 烧录任务在创建时就已经把成品烧进任务目录，这里要直接告诉用户
+        # 成品在哪里、现在的等待动作只剩选择保存目录。
+        if result.export is not None:
             self.status_widget.show_message(
-                f"翻译完成，可在任务页下载成品：{subtitle_path}"
+                f"成品已在任务目录生成：{result.export.export_record.output_path}。"
+                "点击“下载成品”即可保存到其他目录。"
             )
+            return
+        if result.translation is not None:
+            failures = result.translation.failed_segments or []
+            preparation_error = result.final_project.last_error
+            message = (
+                f"翻译完成，有 {len(failures)} 条字幕待手工处理，"
+                "可在任务页的失败清单中点击定位。"
+                if failures
+                else f"翻译完成，可在任务页下载成品：{subtitle_path}"
+            )
+            if preparation_error:
+                # 字幕已经可用，但自动烧录没能成功。这里必须主动说出来，
+                # 否则用户会以为成品也已经生成，直到点击下载才发现要重跑。
+                message = f"{message}（{preparation_error}）"
+            self.status_widget.show_message(message)
             return
         self.status_widget.show_message(f"原文字幕生成完成：{subtitle_path}")
 
@@ -387,6 +463,8 @@ class MainWindow(QMainWindow):
             if not project_id:
                 service = self._pipeline_task_services.get(runner_id)
                 project_id = service.current_project_id() if service else None
+            if not project_id:
+                project_id = self._export_project_ids.get(runner_id)
         if project_id and project_id in self._pending_task_deletions:
             self.tasks_page.refresh_history()
             self.status_widget.show_message("后台任务已退出，正在完成项目删除。")
@@ -408,7 +486,11 @@ class MainWindow(QMainWindow):
         error_dialog.exec()
 
     def _handle_download_success(self, result: ExportVideoResult) -> None:
-        """刷新项目历史，并展示用户下载的最新文件路径。"""
+        """刷新项目历史，并展示用户下载的最新文件路径。
+
+        下载可以重复执行：完成后立刻恢复“下载成品”按钮，用户可以再次选择
+        目录下载同一个项目，或切换外挂/烧录模式另存一份。
+        """
 
         if result.project.project_id in self._pending_task_deletions:
             self.status_widget.show_message("后台下载已退出，正在完成项目删除。")
@@ -433,13 +515,18 @@ class MainWindow(QMainWindow):
         self._release_pipeline_runner(runner)
 
     def _release_pipeline_runner(self, runner: PipelineRunner) -> None:
-        """释放指定已结束线程，并立即开放一个普通任务并发槽位。"""
+        """释放指定已结束线程，并立即恢复对应的界面操作入口。"""
 
-        stored_runner = self._pipeline_runners.pop(id(runner), None)
+        runner_id = id(runner)
+        stored_runner = self._pipeline_runners.pop(runner_id, None)
+        if stored_runner is not None:
+            self._pipeline_project_ids.pop(runner_id, None)
+            self._pipeline_task_services.pop(runner_id, None)
+        else:
+            stored_runner = self._export_runners.pop(runner_id, None)
+            self._export_project_ids.pop(runner_id, None)
         if stored_runner is None:
             return
-        self._pipeline_project_ids.pop(id(runner), None)
-        self._pipeline_task_services.pop(id(runner), None)
         stored_runner.deleteLater()
         self._sync_pipeline_capacity()
         self.tasks_page.refresh_history()
@@ -455,7 +542,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _active_pipeline_project_ids(self) -> set[str]:
-        """返回正在恢复或生成下载成品的已有项目编号集合。"""
+        """返回正在识别、翻译或恢复流程的项目编号集合。"""
 
         # 新建流程启动时尚未生成项目编号。每个后台线程持有独立服务实例，
         # 创建项目用例结束后即可从该实例读取准确编号，不需要按事件顺序猜测。
@@ -472,15 +559,26 @@ class MainWindow(QMainWindow):
             if project_id
         }
 
+    def _active_export_project_ids(self) -> set[str]:
+        """返回正在生成下载成品的项目编号集合。"""
+
+        return {
+            project_id
+            for project_id in self._export_project_ids.values()
+            if project_id
+        }
+
     def _sync_pipeline_capacity(self, message: str = "") -> None:
         """把后台线程数量同步到任务页和窗口顶部创建按钮。"""
 
-        active_count = len(self._pipeline_runners)
+        active_count = len(self._pipeline_runners) + len(self._export_runners)
         self.tasks_page.set_project_operation_capacity(
             active_count=active_count,
             max_concurrency=self._max_pipeline_concurrency,
             message=message,
             active_project_ids=self._active_pipeline_project_ids(),
+            exporting_project_ids=self._active_export_project_ids(),
+            recognition_parallelism=self._recognition_parallelism,
         )
         # 创建入口始终保持可用；高资源步骤的资源限制不应阻止用户建立任务。
         self.import_button.setEnabled(True)
@@ -514,15 +612,44 @@ class MainWindow(QMainWindow):
         self.settings_page.show_save_result(True, message)
         self.status_widget.show_message(message)
 
+    def _handle_task_concurrency_change(self, value: object) -> None:
+        """保存用户在设置页选择的识别并发数，并立即同步任务页说明。"""
+
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            self.settings_page.show_save_result(False, "并发数必须是正整数。")
+            return
+        try:
+            updated_settings = self.task_concurrency_updater(value)
+        except (OSError, RuntimeError, ValueError) as exc:
+            self.logger.exception("保存识别并发数失败")
+            self.settings_page.show_save_result(False, f"保存失败：{exc}")
+            return
+
+        self.settings = updated_settings
+        self._recognition_parallelism = updated_settings.task.max_heavy_concurrency
+        self._max_pipeline_concurrency = updated_settings.task.max_concurrency
+        self._sync_pipeline_capacity()
+        self.settings_page.apply_saved_task_settings(updated_settings.task)
+        message = (
+            f"识别并发数已保存为 {self._recognition_parallelism}，"
+            "对后续等待中的任务生效。"
+        )
+        self.settings_page.show_save_result(True, message)
+        self.status_widget.show_message(message)
+
     def _handle_workspace_change(self, value: object) -> None:
         """切换本地工作区，并在成功后询问是否删除旧目录。"""
 
         if not isinstance(value, Path):
             self.settings_page.show_save_result(False, "工作区路径格式不正确。")
             return
-        if self._pipeline_runners or (
-            self._subtitle_revision_runner is not None
-            and self._subtitle_revision_runner.isRunning()
+        if (
+            self._pipeline_runners
+            or self._export_runners
+            or (
+                self._subtitle_revision_runner is not None
+                and self._subtitle_revision_runner.isRunning()
+            )
         ):
             self.settings_page.show_save_result(
                 False,
@@ -553,7 +680,6 @@ class MainWindow(QMainWindow):
         self.task_service = task_service
         self.tasks_page.set_task_service(task_service)
         self.tasks_page.refresh_history()
-        self.projects_page.show_workspace_root(updated_settings.workspace_root)
         self.settings_page.apply_saved_workspace(updated_settings.workspace_root)
 
         message = f"工作区已切换为：{updated_settings.workspace_root}"
@@ -687,11 +813,23 @@ class MainWindow(QMainWindow):
         request: EditSubtitleTranslationInput | RetranslateSubtitleInput,
         message: str,
     ) -> None:
-        """校验并启动单条字幕修订，避免与完整视频流程并发写入。"""
+        """校验并启动单条字幕修订，避免与同一个项目的完整流程并发写入。
 
-        if self._pipeline_runners:
+        并发限制只针对“当前正在编辑的这个项目”。其他视频正在识别、翻译或
+        生成成品时，本项目的字幕文件和数据库记录是彼此独立的，不应该连带
+        禁用这条修订入口。因此这里按项目编号判断，而不是看是否还有任何
+        后台线程在运行。
+        """
+
+        project_id = request.project_id
+        if project_id in self._active_pipeline_project_ids():
             self.tasks_page.show_subtitle_update_error(
-                "视频任务运行期间不能修改字幕，请等待后台任务完成。"
+                "这个视频正在识别或翻译，完成后才能修改字幕。"
+            )
+            return
+        if project_id in self._active_export_project_ids():
+            self.tasks_page.show_subtitle_update_error(
+                "这个视频正在生成成品，完成后才能修改字幕。"
             )
             return
         if (
@@ -732,7 +870,8 @@ class MainWindow(QMainWindow):
         self.tasks_page.refresh_history(select_project_id=result.project_id)
         message = (
             f"第 {result.item.current_index} 条译文已更新："
-            f"{result.subtitle_path}。已下载的视频不会自动改变。"
+            f"{result.subtitle_path}。已下载的视频不会自动改变；"
+            "选择烧录字幕时，下一次下载会按最新译文重新生成成品。"
         )
         self.tasks_page.show_subtitle_update_result(result.item, message)
         self.status_widget.show_message(
@@ -773,6 +912,8 @@ class MainWindow(QMainWindow):
         """在线程退出后重试项目删除，清理由文件锁造成的残留。"""
 
         active_project_ids = self._active_pipeline_project_ids()
+        # 成品导出可能仍然占用源视频或字幕文件，同样需要等它退出后再清理。
+        active_project_ids |= self._active_export_project_ids()
         revision_project_id = self._active_revision_project_id()
         removed_any = False
         for project_id, workspace_dir in list(

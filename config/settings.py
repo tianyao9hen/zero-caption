@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -156,7 +156,7 @@ class Settings:
     log_level: str = "INFO"
     language: str = "zh-CN"
     theme: str = "system"
-    default_page: str = "projects"
+    default_page: str = "tasks"
     engine: EngineSettings = field(default_factory=EngineSettings)
     runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
     task: TaskSettings = field(default_factory=TaskSettings)
@@ -257,6 +257,47 @@ def save_engine_settings(
         settings,
         current.runtime.model_cache_dir,
         target,
+        task_settings=current.task,
+    )
+
+
+def save_task_settings(
+    max_heavy_concurrency: int,
+    path: str | Path | None = None,
+) -> Path:
+    """持久化用户选择的识别并发数，同时保留工作区与引擎设置。
+
+    参数：
+        max_heavy_concurrency：本地识别和视频导出允许同时进行的数量。
+        path：可选输出路径；生产环境默认使用当前用户配置文件。
+
+    返回：
+        实际写入的 `TOML` 文件路径。
+
+    副作用：
+        会原子替换用户配置文件，但不会改动工作区和引擎分组。
+    """
+
+    target = Path(path) if path is not None else user_data_path("settings.toml")
+    current = load_settings(user_path=target)
+    if max_heavy_concurrency <= 0:
+        raise ValueError("高资源任务并发数必须大于 0。")
+
+    # 普通视频流程的并发上限必须不低于高资源并发上限，否则配置加载时会
+    # 直接触发 `TaskSettings` 的边界校验并让应用无法启动。
+    return _save_user_settings(
+        current.workspace_root,
+        current.engine,
+        current.runtime.model_cache_dir,
+        target,
+        task_settings=replace(
+            current.task,
+            max_concurrency=max(
+                current.task.max_concurrency,
+                max_heavy_concurrency,
+            ),
+            max_heavy_concurrency=max_heavy_concurrency,
+        ),
     )
 
 
@@ -292,6 +333,7 @@ def save_workspace_settings(
         current.engine,
         effective_model_cache,
         target,
+        task_settings=current.task,
     )
 
 
@@ -300,13 +342,19 @@ def _save_user_settings(
     engine_settings: EngineSettings,
     model_cache_dir: Path,
     target: Path,
+    task_settings: TaskSettings | None = None,
 ) -> Path:
-    """把当前可编辑设置一次性写入用户配置文件。"""
+    """把当前可编辑设置一次性写入用户配置文件。
+
+    `task_settings` 允许调用方保留已有的并发设置。保存引擎或工作区时如果
+    不传入它，用户刚调整过的识别并发数会被默认配置悄悄覆盖。
+    """
 
     _validate_asr_settings(engine_settings.asr)
     _validate_translation_settings(engine_settings.translation)
     target.parent.mkdir(parents=True, exist_ok=True)
 
+    effective_task_settings = task_settings or TaskSettings()
     asr = engine_settings.asr
     translation = engine_settings.translation
     content = "\n".join(
@@ -335,6 +383,10 @@ def _save_user_settings(
             "",
             "[runtime]",
             f"model_cache_dir = {_toml_string(str(model_cache_dir))}",
+            "",
+            "[task]",
+            f"max_concurrency = {effective_task_settings.max_concurrency}",
+            f"max_heavy_concurrency = {effective_task_settings.max_heavy_concurrency}",
             "",
         ]
     )

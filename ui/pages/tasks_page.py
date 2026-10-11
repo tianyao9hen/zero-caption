@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QFileDialog,
     QGroupBox,
@@ -44,7 +45,9 @@ class TasksPage(QWidget):
     # 页面只发出“用户想创建任务”的意图，主窗口负责打开参数对话框并
     # 创建后台线程。这样页面不会承担主流程编排职责。
     create_requested = Signal()
-    delete_requested = Signal(str, str)
+    # 批量删除时携带一组 `(项目编号, 项目目录)`，页面只收集用户选择，
+    # 真正的项目级清理仍由核心服务执行。
+    delete_requested = Signal(list)
     retry_requested = Signal(str, str)
     download_requested = Signal(str, str, str)
     save_translation_requested = Signal(str, str, str)
@@ -57,6 +60,9 @@ class TasksPage(QWidget):
         "edit_subtitle_translation": "编辑单句译文",
         "retranslate_subtitle": "重新翻译单句",
         "export_video": "下载成品",
+        # 烧录任务在创建时就先在工作区烧录成品，这一步对用户来说是“生成成品”，
+        # 和用户稍后点击“下载成品”复制文件区分开。
+        "prepare_product": "生成成品",
     }
     _STATUS_LABELS = {
         "new": "新建",
@@ -86,8 +92,13 @@ class TasksPage(QWidget):
         self._active_project_operations = 0
         self._max_project_concurrency = 1
         self._active_project_ids: set[str] = set()
+        # 正在生成下载成品的项目单独记录。识别任务与成品导出是两类不同的
+        # 后台操作，只有同一个项目正在导出时才需要临时禁用它的下载按钮。
+        self._exporting_project_ids: set[str] = set()
         self._selected_history_value: VideoTaskHistoryDTO | None = None
         self._has_complete_translation = False
+        # 识别并发上限由设置页配置后传进来，用于在界面上解释排队原因。
+        self._recognition_parallelism = 1
 
         # 左侧区域沿用桌面任务工具常见的操作方式：创建入口固定在顶部，
         # 历史视频按最近更新时间排列，选择一项后在右侧查看详细状态。
@@ -102,13 +113,16 @@ class TasksPage(QWidget):
         self.delete_button = QPushButton("删除任务")
         self.delete_button.setObjectName("deleteVideoTaskButton")
         self.delete_button.setEnabled(False)
+        self.delete_button.setToolTip(
+            "支持按住 Ctrl 或 Shift 多选，一次删除多个任务。"
+        )
         self.delete_button.clicked.connect(self._request_delete)
         self.concurrency_label = QLabel("后台 0（创建不限量）")
         self.concurrency_label.setObjectName("taskConcurrencyLabel")
-        self.resource_policy_label = QLabel("自动排队串行执行")
+        self.resource_policy_label = QLabel("识别与视频下载生成会自动排队串行执行")
         self.resource_policy_label.setObjectName("taskResourcePolicyLabel")
         self.resource_policy_label.setToolTip(
-            "识别与视频下载生成会自动排队串行执行"
+            "识别和视频下载生成按创建顺序排队执行，可在设置页调整并发数"
         )
         task_actions = QHBoxLayout()
         task_actions.setSpacing(6)
@@ -121,6 +135,10 @@ class TasksPage(QWidget):
         self.task_list.setObjectName("videoTaskList")
         self.task_list.setMinimumWidth(280)
         self.task_list.setSpacing(2)
+        # 允许 Ctrl 多选和 Shift 连选，删除按钮据此批量清理任务。
+        self.task_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.task_list.currentItemChanged.connect(self._show_history_item)
 
         history_group = QGroupBox("视频任务")
@@ -273,7 +291,7 @@ class TasksPage(QWidget):
         translation_actions.addStretch(1)
 
         self.subtitle_feedback_label = QLabel(
-            "保存或重译只更新字幕，不会改动已下载视频。"
+            "保存或重译只更新字幕；烧录成品会在下一次下载时按最新译文刷新。"
         )
         self.subtitle_feedback_label.setWordWrap(True)
 
@@ -324,6 +342,29 @@ class TasksPage(QWidget):
         translation_splitter.setStretchFactor(1, 1)
         translation_splitter.setSizes([560, 320])
         translation_layout.addWidget(translation_splitter, 1)
+
+        # 翻译失败清单独立于主字幕列表。逐条列出失败原因，点击即可跳到
+        # 上方主列表中的同一条字幕，直接进入人工修订流程。
+        failure_group = QGroupBox("翻译失败清单")
+        failure_group.setObjectName("translationFailureGroup")
+        failure_layout = QVBoxLayout(failure_group)
+        failure_layout.setContentsMargins(8, 6, 8, 8)
+        failure_layout.setSpacing(4)
+        self.failure_count_label = QLabel("当前项目没有翻译失败的字幕。")
+        self.failure_count_label.setObjectName("translationFailureCountLabel")
+        self.failure_count_label.setWordWrap(True)
+        self.failed_subtitle_list = QListWidget()
+        self.failed_subtitle_list.setObjectName("failedSubtitleList")
+        self.failed_subtitle_list.setSpacing(2)
+        self.failed_subtitle_list.setMaximumHeight(120)
+        self.failed_subtitle_list.setToolTip("点击失败条目可跳转到对应字幕进行人工处理。")
+        self.failed_subtitle_list.itemClicked.connect(self._jump_to_failed_subtitle)
+        failure_layout.addWidget(self.failure_count_label)
+        failure_layout.addWidget(self.failed_subtitle_list)
+        self.failure_group = failure_group
+        # 没有失败条目时整组隐藏，不占用主视图高度。
+        failure_group.setVisible(False)
+        translation_layout.addWidget(failure_group)
 
         detail_splitter = QSplitter(Qt.Orientation.Vertical)
         detail_splitter.addWidget(detail_group)
@@ -399,6 +440,7 @@ class TasksPage(QWidget):
         self.progress_bar.setValue(0)
         self.translation_count_label.setText("等待字幕翻译")
         self.subtitle_list.clear()
+        self._sync_failure_list([])
         self._clear_subtitle_editor()
 
     def set_project_operation_capacity(
@@ -407,6 +449,8 @@ class TasksPage(QWidget):
         max_concurrency: int,
         message: str = "",
         active_project_ids: set[str] | None = None,
+        exporting_project_ids: set[str] | None = None,
+        recognition_parallelism: int | None = None,
     ) -> None:
         """显示后台视频流程用量，但不限制用户继续创建视频任务。
 
@@ -414,7 +458,9 @@ class TasksPage(QWidget):
             active_count：当前仍在运行的视频级后台线程数量。
             max_concurrency：保留用于兼容旧调用方的配置值；它不再是创建门槛。
             message：可选的当前操作提示。
-            active_project_ids：正在恢复或生成下载成品的已有项目编号。
+            active_project_ids：正在识别或翻译的已有项目编号。
+            exporting_project_ids：正在生成下载成品的项目编号。
+            recognition_parallelism：识别并发上限，用于在界面上说明排队方式。
 
         这个方法只更新界面可用状态。真正的高资源串行约束由核心服务和
         基础设施调度器保证，不能依赖按钮是否启用来维护并发安全。
@@ -423,11 +469,18 @@ class TasksPage(QWidget):
         self._active_project_operations = max(0, active_count)
         self._max_project_concurrency = max(1, max_concurrency)
         self._active_project_ids = set(active_project_ids or ())
+        self._exporting_project_ids = set(exporting_project_ids or ())
+        if recognition_parallelism is not None:
+            self._recognition_parallelism = max(1, recognition_parallelism)
         # 视频任务可以无限创建。高资源步骤是否串行由核心层的资源调度器
         # 决定，不能用“禁用创建按钮”的方式把待处理任务挡在 UI 外面。
         self.create_task_button.setEnabled(True)
         self.concurrency_label.setText(
             f"后台 {self._active_project_operations}（创建不限量）"
+        )
+        self.resource_policy_label.setText(
+            "识别按创建顺序排队执行"
+            f"（同时 {self._recognition_parallelism} 个），下载成品独立排队"
         )
         if message:
             self.message_label.setText(message)
@@ -479,7 +532,11 @@ class TasksPage(QWidget):
             return
 
         self.translation_count_label.setText(
-            f"已完成 {progress.current_index}/{progress.total_segments} 条"
+            (
+                f"已跳过失败 {progress.current_index}/{progress.total_segments} 条"
+                if progress.translation_error
+                else f"已完成 {progress.current_index}/{progress.total_segments} 条"
+            )
         )
         self._upsert_subtitle_item(
             SubtitleTranslationItemDTO(
@@ -491,6 +548,7 @@ class TasksPage(QWidget):
                 end_ms=progress.end_ms,
                 source_text=progress.source_text,
                 translated_text=progress.translated_text,
+                translation_error=progress.translation_error,
             )
         )
 
@@ -499,9 +557,9 @@ class TasksPage(QWidget):
 
         self._subtitle_action_running = running
         current = self._selected_subtitle()
-        has_translation = bool(current and current.translated_text.strip())
-        self.save_translation_button.setEnabled(not running and has_translation)
-        self.retranslate_button.setEnabled(not running and has_translation)
+        has_selection = current is not None
+        self.save_translation_button.setEnabled(not running and has_selection)
+        self.retranslate_button.setEnabled(not running and has_selection)
         self.subtitle_translation_editor.setReadOnly(running)
         self.subtitle_feedback_label.setText(message)
 
@@ -571,11 +629,13 @@ class TasksPage(QWidget):
             self.subtitle_list.clear()
             self.translation_count_label.setText(f"字幕暂不可用：{exc}")
             self._clear_subtitle_editor()
+            self._sync_failure_list([])
             return
 
         self.subtitle_list.clear()
         selected_item: QListWidgetItem | None = None
         translated_count = 0
+        failed_items: list[SubtitleTranslationItemDTO] = []
         for item_value in items:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, item_value)
@@ -583,9 +643,13 @@ class TasksPage(QWidget):
             self.subtitle_list.addItem(item)
             if item_value.translated_text.strip():
                 translated_count += 1
+            elif item_value.translation_error:
+                # 只有既没有译文又记录了失败原因，才算需要人工处理的条目。
+                failed_items.append(item_value)
             if item_value.segment_id == select_segment_id:
                 selected_item = item
 
+        self._sync_failure_list(failed_items)
         if not items:
             self._has_complete_translation = False
             self.translation_count_label.setText("这个项目尚未生成原文字幕")
@@ -594,9 +658,63 @@ class TasksPage(QWidget):
         self.translation_count_label.setText(
             f"已有译文 {translated_count}/{len(items)} 条"
         )
-        self._has_complete_translation = translated_count == len(items)
+        self._has_complete_translation = (
+            translated_count == len(items) and not failed_items
+        )
         self.subtitle_list.setCurrentItem(selected_item or self.subtitle_list.item(0))
         self._sync_project_actions()
+
+    def _sync_failure_list(
+        self,
+        failed_items: list[SubtitleTranslationItemDTO],
+    ) -> None:
+        """重建翻译失败清单，让用户能直接定位到需要人工处理的字幕。"""
+
+        self.failed_subtitle_list.clear()
+        if not failed_items:
+            self.failure_group.setVisible(False)
+            self.failure_count_label.setText("当前项目没有翻译失败的字幕。")
+            return
+
+        self.failure_group.setVisible(True)
+        self.failure_count_label.setText(
+            f"共 {len(failed_items)} 条字幕翻译失败，点击可跳转到对应字幕人工处理。"
+        )
+        for item_value in failed_items:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, item_value)
+            item.setText(
+                f"{item_value.current_index}. "
+                f"{self._format_timestamp(item_value.start_ms)}  "
+                f"{item_value.source_text}\n"
+                f"失败原因：{item_value.translation_error}"
+            )
+            item.setToolTip(f"字幕编号：{item_value.segment_id}")
+            self.failed_subtitle_list.addItem(item)
+
+    def _jump_to_failed_subtitle(self, item: QListWidgetItem) -> None:
+        """把失败清单中的条目定位到主字幕列表，并载入单句修订区。"""
+
+        value = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(value, SubtitleTranslationItemDTO):
+            return
+        for row in range(self.subtitle_list.count()):
+            target = self.subtitle_list.item(row)
+            existing = target.data(Qt.ItemDataRole.UserRole)
+            if (
+                isinstance(existing, SubtitleTranslationItemDTO)
+                and existing.segment_id == value.segment_id
+            ):
+                self.subtitle_list.setCurrentItem(target)
+                self.subtitle_list.scrollToItem(target)
+                self.subtitle_feedback_label.setText(
+                    f"已定位到第 {value.current_index} 条失败字幕，"
+                    "可手工填写译文后保存，或点击“重新翻译这一条”。"
+                )
+                return
+        self.subtitle_feedback_label.setText(
+            "该失败字幕已不在当前字幕列表中，请刷新项目后再试。"
+        )
 
     def _request_retry(self) -> None:
         """把当前失败项目的继续处理意图发给主窗口。"""
@@ -607,25 +725,56 @@ class TasksPage(QWidget):
         self.retry_requested.emit(value.project_id, value.processing_mode)
 
     def _request_delete(self) -> None:
-        """确认后提交删除整个视频项目及其工作目录的请求。"""
+        """确认后提交删除一个或多个视频项目及其工作目录的请求。"""
 
-        value = self._selected_history_value
-        if value is None:
+        targets = self._selected_history_targets()
+        if not targets:
             return
+        if len(targets) == 1:
+            summary = f"任务：{targets[0][2]}"
+        else:
+            names = "\n".join(f"- {name}" for _pid, _dir, name in targets)
+            summary = f"共 {len(targets)} 个任务：\n{names}"
         answer = QMessageBox.question(
             self,
             "确认删除任务",
-            "删除后将永久移除这个视频任务的处理记录、字幕、缓存和项目目录。\n\n"
+            "删除后将永久移除这些视频任务的处理记录、字幕、缓存和项目目录。\n\n"
             "正在处理的任务也可以删除，应用会在后台线程退出后再次清理。\n"
             "原始视频和保存到项目目录外的成品不会被删除。\n\n"
-            f"任务：{value.display_name}\n"
-            f"项目目录：{value.workspace_dir}",
+            f"{summary}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self.delete_requested.emit(value.project_id, str(value.workspace_dir))
+        self.delete_requested.emit(
+            [
+                (project_id, workspace_dir)
+                for project_id, workspace_dir, _name in targets
+            ]
+        )
+
+    def _selected_history_targets(self) -> list[tuple[str, str, str]]:
+        """返回当前选中的全部视频任务，保证删除支持批量执行。
+
+        多选时以 `selectedItems()` 为准；没有额外选择时回退到当前项，
+        这样单选和批量两种操作都不需要用户额外切换选择模式。
+        """
+
+        items = self.task_list.selectedItems() or (
+            [self.task_list.currentItem()]
+            if self.task_list.currentItem() is not None
+            else []
+        )
+        targets: list[tuple[str, str, str]] = []
+        for item in items:
+            value = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(value, VideoTaskHistoryDTO):
+                continue
+            targets.append(
+                (value.project_id, str(value.workspace_dir), value.display_name)
+            )
+        return targets
 
     def _request_download(self) -> None:
         """选择下载目录，并把安全的成品路径交给主窗口。
@@ -704,6 +853,16 @@ class TasksPage(QWidget):
             return value.output_path.parent
         return value.source_video.parent
 
+    def _prepared_product_ready(self, value: VideoTaskHistoryDTO) -> bool:
+        """返回这个任务是否已经有一份可以直接复制出去的烧录成品。
+
+        只有文件此刻仍然存在才算就绪。用户手工删除项目目录里的成品后，
+        界面必须回到“需要重新生成”的说法，而不是承诺一次会失败的秒传。
+        """
+
+        prepared_path = value.prepared_output_path
+        return prepared_path is not None and prepared_path.is_file()
+
     def _select_export_mode(self, mode_value: str) -> None:
         """让导出模式控件显示项目上次保存的选择。"""
 
@@ -713,27 +872,46 @@ class TasksPage(QWidget):
                 return
 
     def _sync_project_actions(self) -> None:
-        """根据当前项目状态启用恢复与下载操作。"""
+        """根据当前项目状态启用恢复与下载操作。
+
+        下载按钮只在这个项目“正在生成成品”时禁用。后台正在识别或翻译其他
+        视频不应该让当前项目无法下载，否则用户会看到一个点不动也点不开的
+        灰色按钮，只能重启应用。
+        """
 
         value = self._selected_history_value
-        available = (
-            value is not None
-            and value.project_id not in self._active_project_ids
-        )
+        available = value is not None
         retryable = available and (
             value.project_status == "failed" or value.task_status == "pending"
         )
+        exporting = (
+            available and value.project_id in self._exporting_project_ids
+        )
         exportable = (
             available
+            and not exporting
             and value.processing_mode == "full_pipeline"
             and self._has_complete_translation
         )
         self.retry_button.setEnabled(bool(retryable))
-        self.export_mode_combo.setEnabled(bool(exportable))
+        self.export_mode_combo.setEnabled(
+            bool(available and not exporting and value.processing_mode == "full_pipeline")
+        )
         self.download_button.setEnabled(bool(exportable))
+        if exporting:
+            self.download_button.setToolTip("该视频正在生成成品，请等待本次下载结束。")
+            return
+        if value is not None and self._prepared_product_ready(value):
+            self.download_button.setToolTip(
+                "成品已在任务目录生成，点击下载会直接保存到所选目录。"
+            )
+            return
+        self.download_button.setToolTip(
+            "可重复下载；每次都可以重新选择保存目录。"
+        )
         # 删除属于项目级清理操作，不受完成、失败或运行状态限制。
         # 运行中删除的最终收尾由主窗口在后台线程退出后完成。
-        self.delete_button.setEnabled(value is not None)
+        self.delete_button.setEnabled(bool(self._selected_history_targets()))
 
     def _show_subtitle_item(
         self,
@@ -757,10 +935,14 @@ class TasksPage(QWidget):
         )
         self.subtitle_source_text.setPlainText(value.source_text)
         self.subtitle_translation_editor.setPlainText(value.translated_text)
-        has_translation = bool(value.translated_text.strip())
-        enabled = has_translation and not self._subtitle_action_running
+        enabled = not self._subtitle_action_running
         self.save_translation_button.setEnabled(enabled)
         self.retranslate_button.setEnabled(enabled)
+        self.subtitle_feedback_label.setText(
+            f"翻译失败：{value.translation_error}"
+            if value.translation_error
+            else ""
+        )
 
     def _request_save_translation(self) -> None:
         """校验当前选择，并把手工译文保存意图发给主窗口。"""
@@ -783,8 +965,8 @@ class TasksPage(QWidget):
         """把当前选中字幕的单句重译意图发给主窗口。"""
 
         value = self._selected_subtitle()
-        if value is None or not value.translated_text.strip():
-            self.subtitle_feedback_label.setText("请先选择一条已有译文的字幕。")
+        if value is None:
+            self.subtitle_feedback_label.setText("请先选择一条字幕。")
             return
         self.retranslate_requested.emit(value.project_id, value.segment_id)
 
@@ -833,6 +1015,8 @@ class TasksPage(QWidget):
         """生成包含序号、时间、原文和译文的两行列表摘要。"""
 
         translated_text = value.translated_text or "（尚无译文）"
+        if value.translation_error:
+            translated_text += f"\n翻译失败：{value.translation_error}"
         item.setText(
             "\n".join(
                 [
@@ -850,7 +1034,7 @@ class TasksPage(QWidget):
     def _clear_subtitle_editor(self) -> None:
         """清空选择区并禁用需要已有译文的操作。"""
 
-        self.selected_subtitle_label.setText("请选择一条已有译文的字幕")
+        self.selected_subtitle_label.setText("请选择一条字幕")
         self.subtitle_source_text.clear()
         self.subtitle_translation_editor.clear()
         self.save_translation_button.setEnabled(False)

@@ -112,3 +112,79 @@ def test_task_rejects_progress_out_of_range():
             checkpoint=TaskCheckpoint.IMPORTED,
             message="超过 100 的进度值无效",
         )
+
+
+def test_task_success_resets_running_progress_step():
+    """任务成功后，步骤文案应换成完成态，而不是保留最后一条进行时进度。
+
+    回归背景：烧录导出时`current_step` 最后一条是“正在生成成品 99%…”。
+    旧实现里`mark_succeeded` 不碰`current_step`，导致任务已经成功、
+    文件已经落盘，界面却永远停在 99%，用户以为导出卡死。
+    """
+
+    # arrange：模拟一个已经跑到 99% 的烧录任务。
+    task = Task(
+        task_id="task-burn",
+        project_id="project-1",
+        task_type="export_video",
+    )
+    task.start("开始导出")
+    task.update_progress(
+        progress=100,
+        current_step="正在生成成品 99%（00:01:52 / 00:01:53）",
+        checkpoint=TaskCheckpoint.TRANSLATED,
+        message="正在生成成品 99%（00:01:52 / 00:01:53）",
+    )
+
+    # act：任务成功收口。
+    task.mark_succeeded(
+        "下载完成：lesson-final.mp4",
+        checkpoint=TaskCheckpoint.EXPORTED,
+        current_step="已生成成品",
+    )
+
+    # assert：状态、进度、消息都正确，且步骤文案不再停留在 99%。
+    assert task.status is TaskStatus.SUCCEEDED
+    assert task.progress == 100
+    assert task.current_step == "已生成成品"
+    assert "99%" not in task.current_step
+    assert task.message == "下载完成：lesson-final.mp4"
+
+
+def test_task_success_defaults_to_generic_completed_step():
+    """调用方未指定完成态步骤时，应回退到通用“已完成”，不留空白。"""
+
+    # arrange：任务没有写过任何步骤文案。
+    task = Task(task_id="task-plain", project_id="project-1", task_type="create_project")
+
+    # act：直接标记成功。
+    task.mark_succeeded("项目已导入", checkpoint=TaskCheckpoint.IMPORTED)
+
+    # assert：默认步骤文案应为完成态，而不是空字符串。
+    assert task.current_step == "已完成"
+
+
+def test_task_failure_resets_running_progress_step():
+    """任务失败后同样要收口步骤文案，避免失败被进行时进度掩盖。"""
+
+    # arrange：模拟一个跑到一半后失败的烧录任务。
+    task = Task(
+        task_id="task-burn-fail",
+        project_id="project-1",
+        task_type="export_video",
+    )
+    task.start("开始导出")
+    task.update_progress(
+        progress=100,
+        current_step="正在生成成品 99%（00:01:52 / 00:01:53）",
+        checkpoint=TaskCheckpoint.TRANSLATED,
+        message="正在生成成品 99%（00:01:52 / 00:01:53）",
+    )
+
+    # act：以磁盘写入失败结束任务。
+    task.mark_failed("成品路径不可写", current_step="成品生成失败")
+
+    # assert：步骤文案应指向失败，而不是继续假装在正常生成。
+    assert task.status is TaskStatus.FAILED
+    assert task.current_step == "成品生成失败"
+    assert task.error_message == "成品路径不可写"

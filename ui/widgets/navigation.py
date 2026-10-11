@@ -23,11 +23,9 @@ class NavigationWidget(QWidget):
         # 导航会嵌入主窗口的单行页眉，内部不再保留第二层外边距。
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        self.projects_button = QPushButton("项目")
         self.tasks_button = QPushButton("任务")
         self.settings_button = QPushButton("设置")
         self._buttons = [
-            self.projects_button,
             self.tasks_button,
             self.settings_button,
         ]
@@ -38,16 +36,14 @@ class NavigationWidget(QWidget):
             # `QButtonGroup` 只管理互斥状态，不负责页面切换。
             button.setCheckable(True)
             self._button_group.addButton(button, index)
-        layout.addWidget(self.projects_button)
         layout.addWidget(self.tasks_button)
         layout.addWidget(self.settings_button)
 
         # 这里使用匿名函数，只是为了把一个固定页面索引绑定到按钮点击事件上。
         # 如果逻辑再复杂一些，就更适合改成具名方法。
-        self.projects_button.clicked.connect(lambda: self.page_changed.emit(0))
-        self.tasks_button.clicked.connect(lambda: self.page_changed.emit(1))
-        self.settings_button.clicked.connect(lambda: self.page_changed.emit(2))
-        self.projects_button.setChecked(True)
+        self.tasks_button.clicked.connect(lambda: self.page_changed.emit(0))
+        self.settings_button.clicked.connect(lambda: self.page_changed.emit(1))
+        self.tasks_button.setChecked(True)
 
     def set_current_page(self, index: int) -> None:
         """选中指定导航按钮并发出页面切换信号。"""
