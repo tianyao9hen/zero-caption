@@ -14,8 +14,6 @@ from pathlib import Path
 import tempfile
 import wave
 
-from PySide6.QtWidgets import QApplication
-
 from app.bootstrap import bootstrap_application, build_runtime_report
 from core.ports.asr import AsrRuntimeReporter, AsrRuntimeVerifier
 
@@ -24,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     """启动桌面应用，或执行发布包自检并返回退出码。"""
 
     _ensure_standard_streams()
+    _prioritize_bundled_qt_dlls()
     arguments = list(argv if argv is not None else sys.argv[1:])
     if "--self-test-report" in arguments:
         index = arguments.index("--self-test-report")
@@ -31,7 +30,16 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         report_path = Path(arguments[index + 1])
         verify_asr_load = "--verify-asr-load" in arguments
-        return _run_self_test(report_path, verify_asr_load=verify_asr_load)
+        verify_qt_import = "--verify-qt-import" in arguments
+        return _run_self_test(
+            report_path,
+            verify_asr_load=verify_asr_load,
+            verify_qt_import=verify_qt_import,
+        )
+
+    # 自检模式不需要创建 Qt 应用对象；把 Qt 延迟到真实 GUI 分支，
+    # 这样发布包可以在导入桌面组件前报告工作区和基础运行时错误。
+    from PySide6.QtWidgets import QApplication
 
     # `QApplication` 是桌面界面程序的根对象。
     # 几乎所有界面控件都依赖它，所以必须最先创建。
@@ -50,6 +58,33 @@ def main(argv: list[str] | None = None) -> int:
     return app.exec()
 
 
+def _prioritize_bundled_qt_dlls() -> None:
+    """在导入 Qt 前优先使用发布包内与绑定匹配的 DLL。"""
+
+    if sys.platform != "win32" or not hasattr(sys, "_MEIPASS"):
+        return
+
+    bundle_root = Path(sys._MEIPASS)
+    qt_directories = []
+    for package_name in ("PySide6", "shiboken6"):
+        for directory in (
+            bundle_root / "_internal" / package_name,
+            bundle_root / package_name,
+        ):
+            if directory.is_dir():
+                qt_directories.append(directory)
+                break
+    if not qt_directories:
+        return
+
+    # PyInstaller 的 Qt 钩子会把 `_internal` 放到 PATH 前面，那里可能有其他依赖
+    # 自带的 VC 运行库。Qt DLL 所在目录应排在它前面，确保导入时版本彼此匹配。
+    existing_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = os.pathsep.join(
+        [*(str(directory) for directory in qt_directories), existing_path]
+    )
+
+
 def _ensure_standard_streams() -> None:
     """为无控制台的 PyInstaller 进程提供可写的标准流占位对象。"""
 
@@ -61,7 +96,11 @@ def _ensure_standard_streams() -> None:
             setattr(sys, stream_name, open(os.devnull, "w", encoding="utf-8"))
 
 
-def _run_self_test(report_path: Path, verify_asr_load: bool = False) -> int:
+def _run_self_test(
+    report_path: Path,
+    verify_asr_load: bool = False,
+    verify_qt_import: bool = False,
+) -> int:
     """写出不依赖控制台的发布包运行报告。"""
 
     context = bootstrap_application()
@@ -70,6 +109,26 @@ def _run_self_test(report_path: Path, verify_asr_load: bool = False) -> int:
         {"name": item.name, "status": item.status, "message": item.message}
         for item in report.items
     ]
+
+    if verify_qt_import:
+        try:
+            from PySide6 import QtWidgets
+
+            items.append(
+                {
+                    "name": "qt_widgets_import",
+                    "status": "pass",
+                    "message": f"QtWidgets 导入成功：{QtWidgets.__file__}",
+                }
+            )
+        except Exception as exc:
+            items.append(
+                {
+                    "name": "qt_widgets_import",
+                    "status": "fail",
+                    "message": f"QtWidgets 导入失败：{type(exc).__name__}: {exc}",
+                }
+            )
 
     if verify_asr_load:
         try:

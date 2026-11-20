@@ -55,6 +55,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加快捷方式："; Flags: unchecked
 
+[InstallDelete]
+; 升级安装前先删掉旧版本的发布载荷目录。
+;
+; `[Files]` 只会覆盖新版本清单里列出的文件，不会清理“新版本已经不再携带”的
+; 旧文件。历史上发布目录根层曾带入 Poppler 的 `icuuc.dll` 和 libheif 的
+; VC 运行库，这些残留文件会抢占 Qt 的同名依赖，导致安装后一启动就报
+; `DLL load failed while importing QtWidgets: 找不到指定的程序。`
+; 因此升级时整目录重建，保证安装后的文件集合与本次发布包完全一致。
+; 该目录只存放程序自带文件，用户数据位于 `%LOCALAPPDATA%\ZeroCaption`。
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "{#MyPayloadSource}"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "install-root.marker"; DestDir: "{app}"; DestName: "{#MyInstallMarkerName}"; Attribs: hidden; Flags: ignoreversion

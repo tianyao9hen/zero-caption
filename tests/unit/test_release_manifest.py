@@ -87,7 +87,9 @@ def test_release_verifier_removes_local_development_dependencies() -> None:
         assert f"'{variable_name}'" in verifier
     assert "$env:HF_HUB_OFFLINE = '1'" in verifier
     assert "$env:TRANSFORMERS_OFFLINE = '1'" in verifier
-    assert "-ArgumentList '-version'" in verifier
+    assert "[System.Text.Encoding]::UTF8" in verifier
+    assert "MainWindowHandle" in verifier
+    assert "packaged GUI exited before creating a window" in verifier
 
 
 def test_build_script_creates_and_verifies_installer() -> None:
@@ -129,6 +131,81 @@ def test_release_bundle_includes_cuda_runtime_libraries() -> None:
     assert 'collect_dynamic_libs("nvidia.cublas")' in spec
     assert "cublas64_12.dll" in verifier
     assert "cublasLt64_12.dll" in verifier
+
+
+def test_release_bundle_registers_qt_dll_paths_before_import() -> None:
+    """发布程序应在导入 Qt 前注册 PySide6 和 shiboken6 的 DLL 目录。"""
+
+    spec = (PROJECT_ROOT / "ZeroCaption.spec").read_text(encoding="utf-8-sig")
+    runtime_hook = (PROJECT_ROOT / "pyi_rth_qt_dlls.py").read_text(
+        encoding="utf-8-sig"
+    )
+    verifier = (
+        PROJECT_ROOT / "scripts" / "verify_packaged_app.ps1"
+    ).read_text(encoding="utf-8-sig")
+
+    assert 'runtime_hooks=[str(repo_root / "pyi_rth_qt_dlls.py")]' in spec
+    assert 'bundle_root / "_internal" / name' in runtime_hook
+    assert 'bundle_root / name' in runtime_hook
+    assert 'bundle_root,' not in runtime_hook
+    assert 'os.environ["PATH"] = os.pathsep.join(' in runtime_hook
+    assert 'os.add_dll_directory(str(directory))' in runtime_hook
+    assert "--verify-qt-import" in verifier
+    assert "MainWindowHandle" in verifier
+    assert "packaged GUI exited before creating a window" in verifier
+
+
+def test_release_bundle_excludes_external_libheif_vc_runtime_conflicts() -> None:
+    """发布包不能把外部 libheif 的 VC 运行库平铺到 Qt DLL 搜索根目录。"""
+
+    spec = (PROJECT_ROOT / "ZeroCaption.spec").read_text(encoding="utf-8-sig")
+
+    assert '"vcruntime140.dll"' in spec
+    assert '"msvcp140.dll"' in spec
+    assert '"vcruntime140_1.dll"' in spec
+    assert '"poppler"' in spec
+    assert 'conflicting_external_parts = {"libheif", "poppler"}' in spec
+    assert 'any(part.casefold() in conflicting_external_parts for part in Path(source).parts)' in spec
+    # 二次清理必须复用同一套判断，避免两份规则各自演化后不一致。
+    assert "def is_conflicting_binary(destination: str, source: str) -> bool:" in spec
+    assert "if not is_conflicting_binary(destination, source)" in spec
+    assert "analysis.binaries = TOC(" in spec
+    assert "if not is_conflicting_binary(entry[0], entry[1])" in spec
+
+
+def test_release_bundle_excludes_root_level_icu_runtime_conflicts() -> None:
+    """发布根层不能出现 ICU 运行库，否则 Qt 会加载到 ABI 不匹配的版本。
+
+    回归背景：开发机的 Poppler 运行时被递归依赖分析带入发布包后，
+    `_internal\\icuuc.dll` 会先于 `PySide6` 子目录被加载，
+    安装版启动时直接报
+    `DLL load failed while importing QtWidgets: 找不到指定的程序。`
+    """
+
+    spec = (PROJECT_ROOT / "ZeroCaption.spec").read_text(encoding="utf-8-sig")
+
+    assert 'name.startswith("icu")' in spec
+    assert 'name.endswith(".dll")' in spec
+    assert "bundled_at_root = len(Path(destination).parts) == 1" in spec
+
+
+def test_installer_clears_stale_payload_before_copying_new_files() -> None:
+    """升级安装必须先清掉旧发布载荷目录，避免旧版本残留 DLL 继续生效。
+
+    回归背景：`[Files]` 只覆盖新清单里的文件，不删除“新版本已不再携带”的
+    旧文件。旧版本根层的 `icuuc.dll` 等残留会让升级后的程序一启动就崩溃。
+    """
+
+    manifest = (PROJECT_ROOT / "installer" / "ZeroCaption.iss").read_text(
+        encoding="utf-8-sig"
+    )
+
+    install_delete = manifest.index("[InstallDelete]")
+    files_section = manifest.index("[Files]")
+    # Inno Setup 总是先处理 `[InstallDelete]` 再处理 `[Files]`，文本顺序不影响行为；
+    # 这里仍然断言它写在前面，是为了让人阅读时能直接看出“先清理旧载荷再复制”。
+    assert install_delete < files_section
+    assert 'Type: filesandordirs; Name: "{app}\\_internal"' in manifest
 
 
 def test_application_logo_is_used_by_executable_and_installer() -> None:

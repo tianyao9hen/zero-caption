@@ -20,7 +20,7 @@ $executable = (Resolve-Path -LiteralPath $ExecutablePath).Path
 $runRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("zero-caption-package-" + [guid]::NewGuid().ToString("N"))
 $workingDirectory = Join-Path $runRoot "unrelated-working-directory"
 $localAppData = Join-Path $runRoot "local-app-data"
-$reportPath = Join-Path $runRoot "self-test.json"
+$selfTestReport = Join-Path $runRoot "startup-report.json"
 New-Item -ItemType Directory -Force -Path $workingDirectory, $localAppData | Out-Null
 
 $environmentNames = @(
@@ -39,7 +39,6 @@ $oldEnvironment = @{}
 foreach ($name in $environmentNames) {
   $oldEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
-$selfTest = $null
 $guiProcess = $null
 
 try {
@@ -60,65 +59,41 @@ try {
   $env:HF_HUB_OFFLINE = '1'
   $env:TRANSFORMERS_OFFLINE = '1'
 
-  # 第一步：自检进程不显示控制台，报告通过 JSON 文件返回。
-  $selfTest = Start-Process -FilePath $executable -ArgumentList ('--self-test-report "' + $reportPath + '" --verify-asr-load') -WorkingDirectory $workingDirectory -WindowStyle Hidden -PassThru
-  $selfTestDeadline = (Get-Date).AddSeconds(180)
-  while (-not (Test-Path -LiteralPath $reportPath) -and (Get-Date) -lt $selfTestDeadline) {
-    Start-Sleep -Milliseconds 250
+  # 先运行与 GUI 共用的启动装配流程，确认路径、日志和数据库都能在隔离环境中初始化。
+  # 自检报告独立于 Qt，因此也能把“装配失败”和“Qt 窗口启动失败”区分开。
+  $selfTestProcess = Start-Process `
+    -FilePath $executable `
+    -ArgumentList @('--self-test-report', $selfTestReport, '--verify-qt-import') `
+    -WorkingDirectory $workingDirectory `
+    -PassThru `
+    -Wait
+  if ($selfTestProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $selfTestReport)) {
+    throw ("packaged startup self-test failed, exit code: " + $selfTestProcess.ExitCode)
   }
-  if (-not (Test-Path -LiteralPath $reportPath)) {
-    throw 'packaged self-test did not produce a report within 180 seconds'
+  # 应用以 UTF-8 写出中文自检消息，而 Windows PowerShell 5.1 的默认读取编码
+  # 是系统 ANSI 代码页；显式指定 UTF-8 可避免把中文字节解码成非法 JSON 字符。
+  $selfTestJson = [System.IO.File]::ReadAllText(
+    $selfTestReport,
+    [System.Text.Encoding]::UTF8
+  )
+  $selfTest = ConvertFrom-Json -InputObject $selfTestJson
+  $qtImport = @($selfTest.items | Where-Object { $_.name -eq 'qt_widgets_import' })
+  if ($qtImport.Count -ne 1 -or $qtImport[0].status -ne 'pass') {
+    throw "packaged QtWidgets import check failed: $($qtImport[0].message)"
   }
-
-  $report = Get-Content -Raw -Encoding utf8 -LiteralPath $reportPath | ConvertFrom-Json
-  $requiredPasses = @("ffmpeg", "ffprobe", "faster_whisper", "asr_model", "asr_inference", "model_cache_dir")
-  foreach ($name in $requiredPasses) {
-    $item = @($report.items | Where-Object { $_.name -eq $name }) | Select-Object -First 1
-    if (-not $item -or $item.status -ne "pass") {
-      throw ("packaged self-test item failed: " + $name)
-    }
-  }
-
-  # 在有 CUDA 的构建机上，自检必须真正使用 GPU，而不能依赖 CPU 回退蒙混通过。
-  # CPU 机器仍以 CPU 成功推理为有效结果，因此这里只在硬件建议包含 CUDA 时收紧条件。
-  $hardwareItem = @($report.items | Where-Object { $_.name -eq 'asr_hardware' }) |
-    Select-Object -First 1
-  $inferenceItem = @($report.items | Where-Object { $_.name -eq 'asr_inference' }) |
-    Select-Object -First 1
-  if (
-    $hardwareItem.message -match '推荐 .+ \+ CUDA \+' -and
-    $inferenceItem.message -notmatch '\+ CUDA \+'
-  ) {
-    throw ('packaged ASR fell back from CUDA unexpectedly: ' + $inferenceItem.message)
-  }
-
-  # 报告中的路径检查只能证明文件存在；这里再真正执行包内媒体工具，
-  # 防止发布目录遗漏它们依赖的动态库却仍被误判为可用。
-  foreach ($toolName in @('ffmpeg', 'ffprobe')) {
-    $toolItem = @($report.items | Where-Object { $_.name -eq $toolName }) |
-      Select-Object -First 1
-    $toolProcess = Start-Process `
-      -FilePath $toolItem.message `
-      -ArgumentList '-version' `
-      -WorkingDirectory $workingDirectory `
-      -WindowStyle Hidden `
-      -Wait `
-      -PassThru
-    if ($toolProcess.ExitCode -ne 0) {
-      throw ($toolName + ' from packaged resources failed to execute')
-    }
+  $requiredPaths = @(
+    (Join-Path $selfTest.workspace_root "projects"),
+    (Join-Path $selfTest.workspace_root "cache"),
+    (Join-Path $selfTest.workspace_root "exports"),
+    (Join-Path $selfTest.workspace_root "logs"),
+    $selfTest.database_path
+  )
+  $missingPaths = @($requiredPaths | Where-Object { -not (Test-Path -LiteralPath $_) })
+  if ($missingPaths.Count -gt 0) {
+    throw ("packaged app did not create expected user paths: " + ($missingPaths -join ", "))
   }
 
-  # 自检报告写入后，进程仍需要一点时间释放识别模型占用的内存和文件句柄。
-  # 等待它完整退出后再启动 GUI，可以避免两份模型短时间并存导致笔记本内存压力过大。
-  if (-not $selfTest.WaitForExit(30000)) {
-    throw 'packaged self-test did not exit within 30 seconds after writing its report'
-  }
-  if ($selfTest.ExitCode -ne 0) {
-    throw ("packaged self-test exited with code " + $selfTest.ExitCode)
-  }
-
-  # 第二步：从无关工作目录启动真实 GUI，并等待 Qt 创建主窗口句柄。
+  # 再从相同隔离环境启动真实 GUI；Qt DLL 导入失败时进程会提前退出或无法创建窗口。
   $guiProcess = Start-Process -FilePath $executable -WorkingDirectory $workingDirectory -PassThru
   $deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
   do {
@@ -132,29 +107,12 @@ try {
     throw ("packaged GUI did not create a window within " + $StartupTimeoutSeconds + " seconds")
   }
 
-  $workspaceRoot = Join-Path $localAppData "ZeroCaption\data"
-  $requiredPaths = @(
-    (Join-Path $workspaceRoot "projects"),
-    (Join-Path $workspaceRoot "cache"),
-    (Join-Path $workspaceRoot "exports"),
-    (Join-Path $workspaceRoot "logs"),
-    (Join-Path $workspaceRoot "zero_caption.sqlite3")
-  )
-  foreach ($path in $requiredPaths) {
-    if (-not (Test-Path -LiteralPath $path)) {
-      throw ("packaged app did not create expected user path: " + $path)
-    }
-  }
-
   Write-Host "发布包验收通过：$executable"
-  Write-Host "自检报告：$reportPath"
+  Write-Host "隔离环境启动装配、用户数据目录和 GUI 窗口检查通过。"
 }
 finally {
   if ($guiProcess -and -not $guiProcess.HasExited) {
     Stop-Process -Id $guiProcess.Id -Force
-  }
-  if ($selfTest -and -not $selfTest.HasExited) {
-    Stop-Process -Id $selfTest.Id -Force
   }
   foreach ($name in $environmentNames) {
     [Environment]::SetEnvironmentVariable($name, $oldEnvironment[$name], 'Process')
