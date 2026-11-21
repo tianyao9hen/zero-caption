@@ -454,6 +454,120 @@ def test_tasks_page_allows_deleting_running_project(
     app.processEvents()
 
 
+def test_tasks_page_allows_deleting_completed_project_with_prepared_product(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """已完成且成品已生成的视频也必须能删除。
+
+    回归背景：`_sync_project_actions` 曾在设置下载按钮提示时提前返回，
+    把删除按钮的启用代码放在了 `return` 之后。已完成任务通常正好命中
+    “成品已在任务目录生成”分支，删除按钮因此永久停留在构造时的禁用状态，
+    用户看不到任何报错，只觉得任务删不掉。
+    """
+
+    # arrange：构造已完成项目，并让内部成品文件真实存在。
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    prepared = tmp_path / "project-completed-delete" / "exports" / "product.mp4"
+    prepared.parent.mkdir(parents=True)
+    prepared.write_bytes(b"fake-video")
+    project = Project(
+        project_id="project-completed-delete",
+        source_video=tmp_path / "completed.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-completed-delete",
+        prepared_output_path=prepared,
+    )
+    project.mark_completed()
+    projects.save(project)
+    completed = Task(
+        "task-completed-delete",
+        project.project_id,
+        "translate_subtitles",
+    )
+    completed.mark_succeeded("翻译完成", TaskCheckpoint.TRANSLATED)
+    tasks.save(completed)
+    page = TasksPage(
+        TaskService(project_repository=projects, task_repository=tasks)
+    )
+    emitted: list[list[tuple[str, str]]] = []
+    page.delete_requested.connect(emitted.append)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    # act：刷新历史选中该项目后直接点击删除。
+    page.refresh_history()
+    assert page.delete_button.isEnabled() is True
+    page.delete_button.click()
+    app.processEvents()
+
+    # assert：删除意图携带项目编号和项目目录，交给主窗口执行真实清理。
+    assert emitted == [[(project.project_id, str(project.workspace_dir))]]
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_tasks_page_allows_deleting_completed_project_while_exporting(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """成品正在导出时删除按钮同样不能被下载逻辑连坐禁用。
+
+    这里不准备预生成成品，专门覆盖“导出中”这个提前返回分支。
+    """
+
+    app = QApplication.instance() or QApplication([])
+    projects = InMemoryProjectRepository()
+    tasks = InMemoryTaskRepository()
+    project = Project(
+        project_id="project-exporting-delete",
+        source_video=tmp_path / "exporting.mp4",
+        source_language="en",
+        target_language="zh-CN",
+        workspace_dir=tmp_path / "project-exporting-delete",
+    )
+    project.mark_completed()
+    projects.save(project)
+    completed = Task(
+        "task-exporting-delete",
+        project.project_id,
+        "export_video",
+    )
+    completed.mark_succeeded("下载完成", TaskCheckpoint.EXPORTED)
+    tasks.save(completed)
+    page = TasksPage(
+        TaskService(project_repository=projects, task_repository=tasks)
+    )
+    emitted: list[list[tuple[str, str]]] = []
+    page.delete_requested.connect(emitted.append)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    page.refresh_history()
+    # 模拟主窗口广播“该项目正在生成成品”的容量状态。
+    page.set_project_operation_capacity(
+        active_count=1,
+        max_concurrency=1,
+        exporting_project_ids={project.project_id},
+    )
+    assert page.delete_button.isEnabled() is True
+    page.delete_button.click()
+    app.processEvents()
+
+    assert emitted == [[(project.project_id, str(project.workspace_dir))]]
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_tasks_page_deletes_multiple_selected_tasks_in_one_action(
     tmp_path,
     monkeypatch,

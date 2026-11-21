@@ -384,6 +384,12 @@ class TasksPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter, 1)
 
+        # `currentItemChanged` 只在“当前项”变化时触发，按住 Ctrl 追加或取消
+        # 选择其他条目并不会改变当前项，删除按钮就会停在旧状态。
+        # 因此再订阅一次选择集合变化，并且放在构造函数最后连接，
+        # 确保首次触发时所有按钮控件都已经创建完成。
+        self.task_list.itemSelectionChanged.connect(self._sync_project_actions)
+
     def set_task_service(self, task_service: TaskService) -> None:
         """替换查询服务，并用新服务重新读取持久化任务历史。"""
 
@@ -586,6 +592,12 @@ class TasksPage(QWidget):
         """把左侧选中的持久化记录展示到右侧详情。"""
 
         if current is None:
+            # 刷新列表清空选择、或用户主动取消选中时会走到这里。
+            # 必须把缓存的项目状态一起清空，否则重试、下载等按钮会残留
+            # 上一个项目的能力，出现“没有选中任务却能点下载”的错觉。
+            self._selected_history_value = None
+            self._has_complete_translation = False
+            self._sync_project_actions()
             return
         value = current.data(Qt.ItemDataRole.UserRole)
         if not isinstance(value, VideoTaskHistoryDTO):
@@ -898,6 +910,14 @@ class TasksPage(QWidget):
             bool(available and not exporting and value.processing_mode == "full_pipeline")
         )
         self.download_button.setEnabled(bool(exportable))
+        # 删除属于项目级清理操作，不受完成、失败或运行状态限制。
+        # 运行中删除的最终收尾由主窗口在后台线程退出后完成。
+        #
+        # 这里必须先算出删除按钮的可用状态，不能放到下面几个 `return` 之后。
+        # 下载提示的逻辑对“正在导出”和“成品已生成”两种情况会提前返回，
+        # 而这两种情况恰好是已完成任务最常见的状态；一旦被跳过，
+        # 删除按钮就会一直停留在构造时的禁用状态，用户会觉得任务删不掉。
+        self.delete_button.setEnabled(bool(self._selected_history_targets()))
         if exporting:
             self.download_button.setToolTip("该视频正在生成成品，请等待本次下载结束。")
             return
@@ -909,9 +929,6 @@ class TasksPage(QWidget):
         self.download_button.setToolTip(
             "可重复下载；每次都可以重新选择保存目录。"
         )
-        # 删除属于项目级清理操作，不受完成、失败或运行状态限制。
-        # 运行中删除的最终收尾由主窗口在后台线程退出后完成。
-        self.delete_button.setEnabled(bool(self._selected_history_targets()))
 
     def _show_subtitle_item(
         self,
